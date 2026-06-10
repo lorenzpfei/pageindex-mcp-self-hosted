@@ -12,12 +12,13 @@ original extracted text.
 import base64
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import litellm
 import pymupdf
 
-from pageindex.utils import count_tokens
+from pageindex.utils import completion_kwargs, count_tokens, retry_sleep
 
 # Vision model for transcription (any LiteLLM model id); "off" disables OCR.
 MODEL = os.environ.get("PAGEINDEX_OCR_MODEL", "gemini/gemini-3.5-flash")
@@ -25,7 +26,7 @@ MODEL = os.environ.get("PAGEINDEX_OCR_MODEL", "gemini/gemini-3.5-flash")
 MIN_CHARS = int(os.environ.get("PAGEINDEX_OCR_MIN_CHARS", "100"))
 DPI = 150
 MAX_PARALLEL = 4
-MAX_RETRIES = 3
+MAX_RETRIES = 8  # exponential backoff: must outlast 30s+ rate-limit windows
 
 PROMPT = (
     "Transcribe this document page to plain text. Preserve headings and reading "
@@ -51,12 +52,14 @@ def _transcribe_page(pdf_path: str, page_index: int) -> str:
         {"type": "text", "text": PROMPT},
         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
     ]}]
-    for _ in range(MAX_RETRIES):
+    for attempt in range(MAX_RETRIES):
         try:
-            response = litellm.completion(model=MODEL, messages=messages, temperature=0)
+            response = litellm.completion(model=MODEL, messages=messages, **completion_kwargs(MODEL))
             return response.choices[0].message.content or ""
         except Exception as e:
             logging.error(f"OCR failed for page {page_index + 1}: {e}")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(retry_sleep(attempt))
     return ""
 
 

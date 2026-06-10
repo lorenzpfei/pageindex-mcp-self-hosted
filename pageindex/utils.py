@@ -29,6 +29,20 @@ def count_tokens(text, model=None):
     return litellm.token_counter(model=model, text=text)
 
 
+def completion_kwargs(model):
+    """Gemini 3 models degrade with temperature < 1.0 (LiteLLM warns about
+    infinite loops / failures); keep the deterministic 0 only elsewhere."""
+    if model and model.removeprefix("litellm/").startswith("gemini"):
+        return {}
+    return {"temperature": 0}
+
+
+def retry_sleep(attempt):
+    """Exponential backoff: rate-limit errors (e.g. Gemini free tier) come
+    with retry windows of 30s+ that a 1s sleep never outlasts."""
+    return min(2 ** attempt, 60)
+
+
 def llm_completion(model, prompt, chat_history=None, return_finish_reason=False):
     if model:
         model = model.removeprefix("litellm/")
@@ -39,7 +53,7 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
             response = litellm.completion(
                 model=model,
                 messages=messages,
-                temperature=0,
+                **completion_kwargs(model),
             )
             content = response.choices[0].message.content
             if return_finish_reason:
@@ -50,7 +64,7 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
             print('************* Retrying *************')
             logging.error(f"Error: {e}")
             if i < max_retries - 1:
-                time.sleep(1)
+                time.sleep(retry_sleep(i))
             else:
                 logging.error('Max retries reached for prompt: ' + prompt)
                 if return_finish_reason:
@@ -69,14 +83,14 @@ async def llm_acompletion(model, prompt):
             response = await litellm.acompletion(
                 model=model,
                 messages=messages,
-                temperature=0,
+                **completion_kwargs(model),
             )
             return response.choices[0].message.content
         except Exception as e:
             print('************* Retrying *************')
             logging.error(f"Error: {e}")
             if i < max_retries - 1:
-                await asyncio.sleep(1)
+                await asyncio.sleep(retry_sleep(i))
             else:
                 logging.error('Max retries reached for prompt: ' + prompt)
                 return ""
