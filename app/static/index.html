@@ -45,6 +45,9 @@
   .row .meta { font-size: 12px; color: var(--muted); }
   .badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 500; flex: none; }
   .badge.processing { color: var(--amber); background: #fef3c7; }
+  .badge.uploading { color: var(--blue); background: #dbeafe; animation: pulse 1.2s ease-in-out infinite; }
+  .row.skeleton .ico, .row.skeleton .name { animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .45; } }
   .badge.done { color: var(--green); background: #dcfce7; }
   .badge.failed { color: var(--red); background: #fee2e2; cursor: help; }
   .empty { color: var(--muted); text-align: center; padding: 48px 0; }
@@ -96,6 +99,7 @@ let token = localStorage.getItem("pageindex_token") || "";
 let state = { projects: [], documents: [] };
 let currentProject = null;   // null = root
 let pollTimer = null;
+let pendingUploads = [];     // [{name, project}] - shown as skeletons until the server knows them
 
 function api(path, opts = {}) {
   opts.headers = Object.assign({ "Authorization": "Bearer " + token }, opts.headers || {});
@@ -174,6 +178,15 @@ function render() {
       <button class="icon danger" data-deldoc="${esc(d.doc_id)}" title="Delete document">✕</button>
     </div>`;
   }
+  for (const u of pendingUploads) {
+    const inView = currentProject === null ? !u.project : u.project === currentProject;
+    if (!inView) continue;
+    html += `<div class="row skeleton">
+      <div class="ico">📄</div>
+      <div class="main"><div class="name">${esc(u.name)}</div><div class="meta">uploading…</div></div>
+      <span class="badge uploading">uploading…</span>
+    </div>`;
+  }
   $("list").innerHTML = html || `<div class="empty">${currentProject === null ? "No folders or files yet. Upload a PDF to get started." : "Empty folder. Drop a PDF here."}</div>`;
 
   $("crumbs").innerHTML = currentProject === null
@@ -215,14 +228,19 @@ function render() {
 }
 
 async function uploadFiles(files) {
-  for (const f of files) {
+  const items = [...files].map(f => ({ file: f, ph: { name: f.name, project: currentProject || "" } }));
+  pendingUploads.push(...items.map(i => i.ph));
+  render();
+  for (const { file, ph } of items) {
     const fd = new FormData();
-    fd.append("file", f);
-    fd.append("project", currentProject || "");
-    const r = await api("/api/upload", { method: "POST", body: fd });
-    if (!r.ok) alert(`Upload of ${f.name} failed: ${(await r.json()).error || r.status}`);
+    fd.append("file", file);
+    fd.append("project", ph.project);
+    let r = null;
+    try { r = await api("/api/upload", { method: "POST", body: fd }); } catch (e) {}
+    pendingUploads = pendingUploads.filter(x => x !== ph);
+    if (r && !r.ok) alert(`Upload of ${file.name} failed: ${(await r.json()).error || r.status}`);
+    await refresh();
   }
-  refresh();
 }
 
 $("gateForm").onsubmit = e => { e.preventDefault(); unlock($("gateToken").value.trim()); };
