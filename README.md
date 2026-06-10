@@ -68,6 +68,28 @@ claude mcp add --transport http pageindex-self https://<your-domain>/mcp \
   --header "Authorization: Bearer <PAGEINDEX_MCP_API_KEY>"
 ```
 
+For opencode (`~/.config/opencode/opencode.json`, or a project-level
+`opencode.json`):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "pageindex-self": {
+      "type": "remote",
+      "url": "https://<your-domain>/mcp",
+      "enabled": true,
+      "headers": {
+        "Authorization": "Bearer <PAGEINDEX_MCP_API_KEY>"
+      }
+    }
+  }
+}
+```
+
+To keep the token out of the config file, opencode supports env substitution:
+`"Authorization": "Bearer {env:PAGEINDEX_MCP_API_KEY}"`.
+
 ## Deployment
 
 The compose file attaches the service to the external `dokploy-network`, so in
