@@ -75,5 +75,7 @@ commented-out `127.0.0.1` port binding in `docker-compose.yml`.
 
 ## Persistence
 
-`./data/` (PDFs, generated trees, registry) is bind-mounted and persists
-across rebuilds/restarts. Back it up if you don't want to re-run ingest.
+`../files/data/` (PDFs, generated trees, registry) is bind-mounted and persists
+across rebuilds/restarts. On Dokploy this is the app's `files` storage dir,
+which survives redeploys (the code dir does not). Back it up if you don't want
+to re-run ingest.

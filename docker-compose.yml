@@ -8,7 +8,10 @@ services:
       - PAGEINDEX_DATA_DIR=/data
       - PORT=8000
     volumes:
-      - ./data:/data
+      # Dokploy re-clones the repo into the code dir on every deploy; ../files
+      # is its stable per-app storage dir. For plain local use, ../files simply
+      # ends up next to the repo checkout - also fine.
+      - ../files/data:/data
     networks:
       - dokploy-network
     # For local use without Dokploy/Traefik, remove the networks section above
