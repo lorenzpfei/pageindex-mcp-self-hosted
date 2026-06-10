@@ -1,0 +1,11 @@
+# PageIndex (vendored) dependencies
+litellm==1.83.7
+pymupdf==1.26.4
+PyPDF2==3.0.1
+python-dotenv==1.2.2
+pyyaml==6.0.2
+
+# MCP server
+mcp==1.9.4
+starlette==0.47.1
+uvicorn==0.34.2

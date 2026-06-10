@@ -1,0 +1,13 @@
+services:
+  pageindex-mcp:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PAGEINDEX_DATA_DIR=/data
+      - PORT=8000
+    volumes:
+      - ./data:/data
+    ports:
+      - "8000:8000"
