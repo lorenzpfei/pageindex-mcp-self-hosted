@@ -32,6 +32,9 @@ How it works:
 1. Copy `.env.example` to `.env` and fill in:
    - `OPENAI_API_KEY` - used only during ingest (tree building)
    - `PAGEINDEX_MCP_API_KEY` - bearer token clients must send, e.g. `openssl rand -hex 32`
+   - optional: `PAGEINDEX_MODEL` (any LiteLLM model id for tree-building;
+     default gpt-4o-2024-11-20) and `PAGEINDEX_INGEST_WORKERS` (parallel PDF
+     ingests, default 2)
 
 2. Build and start:
 

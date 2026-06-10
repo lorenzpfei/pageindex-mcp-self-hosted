@@ -1,7 +1,10 @@
-"""Background ingest worker.
+"""Background ingest workers.
 
-A single daemon thread processes uploads one at a time (tree building is
-LLM- and memory-heavy; the server stays responsive while it runs).
+A small pool of daemon threads (PAGEINDEX_INGEST_WORKERS, default 2) builds
+trees for uploaded PDFs. Each ingest holds the PDF + tree in memory
+(~150-200 MB for typical lecture decks) and page_index_main already
+parallelizes its LLM calls internally, so a high worker count mostly burns
+RAM and OpenAI rate limits rather than speeding things up.
 """
 import json
 import os
@@ -17,6 +20,9 @@ from pageindex.utils import ConfigLoader  # noqa: E402
 
 import store  # noqa: E402
 
+WORKERS = max(1, int(os.environ.get("PAGEINDEX_INGEST_WORKERS", "2")))
+MODEL = os.environ.get("PAGEINDEX_MODEL", "")  # empty = pageindex/config.yaml default
+
 _queue: "queue.Queue[str]" = queue.Queue()
 _started = False
 
@@ -27,7 +33,10 @@ def build_tree(doc_id: str) -> None:
     if not entry:
         return
     try:
-        opt = ConfigLoader().load({"if_add_doc_description": "yes"})
+        overrides = {"if_add_doc_description": "yes"}
+        if MODEL:
+            overrides["model"] = MODEL
+        opt = ConfigLoader().load(overrides)
         result = page_index_main(entry["pdf_path"], opt)
         tree_path = os.path.join(store.TREE_DIR, f"{doc_id}.json")
         os.makedirs(store.TREE_DIR, exist_ok=True)
@@ -75,4 +84,5 @@ def start() -> None:
         return
     _started = True
     recover_interrupted()
-    threading.Thread(target=_worker, daemon=True, name="ingest-worker").start()
+    for i in range(WORKERS):
+        threading.Thread(target=_worker, daemon=True, name=f"ingest-worker-{i}").start()
