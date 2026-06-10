@@ -181,7 +181,7 @@ def load_doc_info(doc_id: str) -> dict | None:
         }
     with open(entry["tree_path"], "r", encoding="utf-8") as f:
         tree = json.load(f)
-    return {
+    doc_info = {
         "type": "pdf",
         "path": entry["pdf_path"],
         "doc_name": entry.get("doc_name", tree.get("doc_name", "")),
@@ -189,3 +189,10 @@ def load_doc_info(doc_id: str) -> dict | None:
         "structure": tree.get("structure", []),
         "page_count": entry.get("page_count"),
     }
+    # Cached page texts (written when OCR replaced sparse pages at ingest);
+    # retrieve.get_page_content prefers these over live PDF extraction.
+    pages_path = entry.get("pages_path", "")
+    if pages_path and os.path.isfile(pages_path):
+        with open(pages_path, "r", encoding="utf-8") as f:
+            doc_info["pages"] = json.load(f)
+    return doc_info

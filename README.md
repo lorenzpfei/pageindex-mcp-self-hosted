@@ -8,9 +8,14 @@ vendored copy of VectifyAI's open-source PageIndex package (MIT licensed, see
 How it works:
 
 - **Ingest** (`app/ingest.py`): builds a hierarchical "table of contents" tree
-  for a PDF using an LLM (OpenAI by default, configurable via
-  `pageindex/config.yaml` + LiteLLM). This costs a small amount of LLM usage,
-  once per document.
+  for a PDF using an LLM (Gemini Flash by default, configurable via
+  `PAGEINDEX_MODEL` / `pageindex/config.yaml` + LiteLLM). This costs a small
+  amount of LLM usage, once per document.
+- **Hybrid OCR** (`app/ocr.py`): pages whose embedded text layer is too sparse
+  (scans, image-heavy slides) are rendered and transcribed by a vision model
+  during ingest; born-digital text pages are read losslessly for free. The
+  transcriptions are cached so retrieval serves them too. Disable with
+  `PAGEINDEX_OCR_MODEL=off`.
 - **Serve** (`app/server.py`): exposes `list_documents`, `get_document`,
   `get_document_structure`, `get_page_content` as MCP tools over streamable
   HTTP, protected by a bearer token. The connecting agent (e.g. Claude) does
@@ -30,11 +35,12 @@ How it works:
 ## Setup
 
 1. Copy `.env.example` to `.env` and fill in:
-   - `OPENAI_API_KEY` - used only during ingest (tree building)
+   - `GEMINI_API_KEY` - used only during ingest (tree building + OCR)
    - `PAGEINDEX_MCP_API_KEY` - bearer token clients must send, e.g. `openssl rand -hex 32`
    - optional: `PAGEINDEX_MODEL` (any LiteLLM model id for tree-building;
-     default gpt-4o-2024-11-20) and `PAGEINDEX_INGEST_WORKERS` (parallel PDF
-     ingests, default 2)
+     default gemini/gemini-3.5-flash), `PAGEINDEX_OCR_MODEL` (vision model
+     for text-poor pages, "off" to disable) and `PAGEINDEX_INGEST_WORKERS`
+     (parallel PDF ingests, default 2)
 
 2. Build and start:
 

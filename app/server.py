@@ -270,7 +270,7 @@ async def api_delete_document(request):
     entry = store.delete_document(doc_id)
     if not entry:
         return JSONResponse({"error": "not found"}, status_code=404)
-    for path in (entry.get("pdf_path"), entry.get("tree_path")):
+    for path in (entry.get("pdf_path"), entry.get("tree_path"), entry.get("pages_path")):
         if path and os.path.isfile(path):
             os.remove(path)
     return JSONResponse({"deleted": doc_id})
