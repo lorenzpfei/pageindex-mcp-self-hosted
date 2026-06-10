@@ -20,7 +20,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pageindex import page_index_main  # noqa: E402
-from pageindex.utils import ConfigLoader  # noqa: E402
+from pageindex.utils import ConfigLoader, get_number_of_pages  # noqa: E402
 
 from store import DATA_DIR, PDF_DIR, TREE_DIR, load_registry, save_registry  # noqa: E402
 
@@ -66,6 +66,7 @@ def main() -> int:
         "doc_description": result.get("doc_description", ""),
         "pdf_path": target_pdf_path,
         "tree_path": tree_path,
+        "page_count": get_number_of_pages(target_pdf_path),
     }
     save_registry(registry)
 

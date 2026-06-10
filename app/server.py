@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
-from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
-from starlette.requests import Request  # noqa: E402
-from starlette.responses import JSONResponse  # noqa: E402
+from starlette.responses import JSONResponse, PlainTextResponse  # noqa: E402
+from starlette.routing import Route  # noqa: E402
 
 from pageindex.retrieve import (  # noqa: E402
     get_document as _get_document,
@@ -30,25 +30,30 @@ API_KEY = os.environ.get("PAGEINDEX_MCP_API_KEY")
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
 
-mcp = FastMCP("pageindex-self-hosted", host=HOST, port=PORT)
+# stateless + JSON responses: no in-memory sessions (survives redeploys without
+# breaking connected clients) and no SSE streams to upset reverse proxies.
+mcp = FastMCP(
+    "pageindex-self-hosted",
+    host=HOST,
+    port=PORT,
+    stateless_http=True,
+    json_response=True,
+)
 
 
 @mcp.tool()
 def list_documents() -> str:
     """List all ingested documents with their id, name, description, and page count."""
     registry = load_registry()
-    items = []
-    for doc_id, entry in registry.items():
-        doc_info = load_doc_info(doc_id)
-        page_count = json.loads(_get_document(documents={doc_id: doc_info}, doc_id=doc_id)).get("page_count")
-        items.append(
-            {
-                "doc_id": doc_id,
-                "doc_name": entry.get("doc_name", ""),
-                "doc_description": entry.get("doc_description", ""),
-                "page_count": page_count,
-            }
-        )
+    items = [
+        {
+            "doc_id": doc_id,
+            "doc_name": entry.get("doc_name", ""),
+            "doc_description": entry.get("doc_description", ""),
+            "page_count": entry.get("page_count"),
+        }
+        for doc_id, entry in registry.items()
+    ]
     return json.dumps(items, ensure_ascii=False)
 
 
@@ -86,19 +91,35 @@ def get_page_content(doc_id: str, pages: str) -> str:
     return _get_page_content(documents={doc_id: doc_info}, doc_id=doc_id, pages=pages)
 
 
-class BearerAuthMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        if API_KEY:
-            auth = request.headers.get("authorization", "")
-            if auth != f"Bearer {API_KEY}":
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
-        return await call_next(request)
+class BearerAuthMiddleware:
+    """Pure ASGI middleware: BaseHTTPMiddleware buffers streamed responses,
+    which can break the MCP streamable-HTTP transport."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and API_KEY and scope["path"] != "/health":
+            auth = ""
+            for name, value in scope.get("headers", []):
+                if name == b"authorization":
+                    auth = value.decode("latin-1")
+                    break
+            if not secrets.compare_digest(auth, f"Bearer {API_KEY}"):
+                response = JSONResponse({"error": "unauthorized"}, status_code=401)
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+async def health(request):
+    return PlainTextResponse("ok")
 
 
 def build_app():
     app = mcp.streamable_http_app()
-    app.add_middleware(BearerAuthMiddleware)
-    return app
+    app.router.routes.append(Route("/health", health))
+    return BearerAuthMiddleware(app)
 
 
 app = build_app()

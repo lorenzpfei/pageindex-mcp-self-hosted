@@ -25,8 +25,10 @@ def load_registry() -> dict:
 
 def save_registry(registry: dict) -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(REGISTRY_PATH, "w", encoding="utf-8") as f:
+    tmp_path = REGISTRY_PATH + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(registry, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, REGISTRY_PATH)
 
 
 def load_doc_info(doc_id: str) -> dict | None:
@@ -43,4 +45,5 @@ def load_doc_info(doc_id: str) -> dict | None:
         "doc_name": entry.get("doc_name", tree.get("doc_name", "")),
         "doc_description": entry.get("doc_description", tree.get("doc_description", "")),
         "structure": tree.get("structure", []),
+        "page_count": entry.get("page_count"),
     }

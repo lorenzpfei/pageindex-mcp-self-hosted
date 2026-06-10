@@ -9,5 +9,19 @@ services:
       - PORT=8000
     volumes:
       - ./data:/data
-    ports:
-      - "8000:8000"
+    networks:
+      - dokploy-network
+    # For local use without Dokploy/Traefik, remove the networks section above
+    # and uncomment this instead (bound to localhost only - the bearer token
+    # would otherwise travel unencrypted over plain HTTP):
+    # ports:
+    #   - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  dokploy-network:
+    external: true

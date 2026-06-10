@@ -63,8 +63,15 @@ claude mcp add --transport http pageindex-self https://<your-domain>/mcp \
 
 ## Deployment
 
-Expose port 8000 behind a reverse proxy (e.g. Dokploy/Traefik) with TLS and a
-domain, then use that domain in the MCP client config above.
+The compose file attaches the service to the external `dokploy-network`, so in
+Dokploy you only need to add a domain pointing at service `pageindex-mcp`,
+port `8000` (Traefik handles TLS). The container port is intentionally not
+published on the host - the bearer token must only travel over HTTPS.
+
+For plain local use (no Dokploy), swap the `networks` section for the
+commented-out `127.0.0.1` port binding in `docker-compose.yml`.
+
+`GET /health` is unauthenticated and returns `ok` - useful for uptime checks.
 
 ## Persistence
 
