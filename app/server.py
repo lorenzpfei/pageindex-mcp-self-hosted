@@ -159,6 +159,34 @@ async def api_create_project(request):
     return JSONResponse({"name": name}, status_code=201)
 
 
+async def api_rename_project(request):
+    old = request.path_params["name"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    new = (body.get("name") or "").strip()
+    if not new or len(new) > 100:
+        return JSONResponse({"error": "invalid project name"}, status_code=400)
+    if new != old and not store.rename_project(old, new):
+        return JSONResponse({"error": "project not found or target name already exists"}, status_code=400)
+    return JSONResponse({"name": new})
+
+
+async def api_retry_document(request):
+    doc_id = request.path_params["doc_id"]
+    entry = store.load_registry().get(doc_id)
+    if not entry:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if entry.get("status") == "processing":
+        return JSONResponse({"error": "already processing"}, status_code=409)
+    if not os.path.isfile(entry.get("pdf_path", "")):
+        return JSONResponse({"error": "PDF file is missing - delete and re-upload"}, status_code=400)
+    store.update_document(doc_id, status="processing", error="")
+    jobs.enqueue(doc_id)
+    return JSONResponse({"doc_id": doc_id, "status": "processing"})
+
+
 async def api_delete_project(request):
     name = request.path_params["name"]
     if not store.remove_project(name):
@@ -240,8 +268,10 @@ def build_app():
             Route("/health", health),
             Route("/api/state", api_state),
             Route("/api/projects", api_create_project, methods=["POST"]),
+            Route("/api/projects/{name}", api_rename_project, methods=["PATCH"]),
             Route("/api/projects/{name}", api_delete_project, methods=["DELETE"]),
             Route("/api/upload", api_upload, methods=["POST"]),
+            Route("/api/documents/{doc_id}/retry", api_retry_document, methods=["POST"]),
             Route("/api/documents/{doc_id}", api_delete_document, methods=["DELETE"]),
         ]
     )

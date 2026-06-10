@@ -81,6 +81,21 @@ def remove_project(name: str) -> bool:
         return True
 
 
+def rename_project(old: str, new: str) -> bool:
+    """Rename a project and update all documents in it. Fails if the target
+    name already exists (no implicit merging)."""
+    with _LOCK:
+        db = _load_db()
+        if old not in db["projects"] or new in db["projects"]:
+            return False
+        db["projects"][db["projects"].index(old)] = new
+        for entry in db["documents"].values():
+            if entry.get("project") == old:
+                entry["project"] = new
+        _save_db(db)
+        return True
+
+
 def unique_doc_id(base: str) -> str:
     with _LOCK:
         docs = _load_db()["documents"]

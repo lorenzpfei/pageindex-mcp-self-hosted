@@ -157,6 +157,7 @@ function render() {
       html += `<div class="row clickable" data-project="${esc(p)}">
         <div class="ico">📁</div>
         <div class="main"><div class="name">${esc(p)}</div><div class="meta">${n} file${n === 1 ? "" : "s"}</div></div>
+        <button class="icon" data-renproject="${esc(p)}" title="Rename folder">✎</button>
         ${n === 0 ? `<button class="icon danger" data-delproject="${esc(p)}" title="Delete empty folder">✕</button>` : ""}
       </div>`;
     }
@@ -169,6 +170,7 @@ function render() {
         <div class="meta">${d.page_count ?? "?"} pages · ${fmtDate(d.uploaded_at)}</div>
       </div>
       ${badge(d)}
+      ${d.status === "failed" ? `<button class="icon" data-retrydoc="${esc(d.doc_id)}" title="Retry ingest">↻</button>` : ""}
       <button class="icon danger" data-deldoc="${esc(d.doc_id)}" title="Delete document">✕</button>
     </div>`;
   }
@@ -181,7 +183,23 @@ function render() {
   if (root) root.onclick = () => { currentProject = null; render(); };
 
   for (const el of $("list").querySelectorAll("[data-project]"))
-    el.onclick = e => { if (e.target.dataset.delproject) return; currentProject = el.dataset.project; render(); };
+    el.onclick = e => { if (e.target.dataset.delproject || e.target.dataset.renproject) return; currentProject = el.dataset.project; render(); };
+  for (const el of $("list").querySelectorAll("[data-renproject]"))
+    el.onclick = async () => {
+      const name = prompt("New folder name:", el.dataset.renproject);
+      if (!name || !name.trim() || name.trim() === el.dataset.renproject) return;
+      const r = await api("/api/projects/" + encodeURIComponent(el.dataset.renproject), {
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: name.trim() })
+      });
+      if (!r.ok) alert((await r.json()).error || "Rename failed");
+      refresh();
+    };
+  for (const el of $("list").querySelectorAll("[data-retrydoc]"))
+    el.onclick = async () => {
+      const r = await api("/api/documents/" + encodeURIComponent(el.dataset.retrydoc) + "/retry", { method: "POST" });
+      if (!r.ok) alert((await r.json()).error || "Retry failed");
+      refresh();
+    };
   for (const el of $("list").querySelectorAll("[data-delproject]"))
     el.onclick = async () => {
       if (!confirm(`Delete empty folder "${el.dataset.delproject}"?`)) return;
