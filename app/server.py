@@ -214,6 +214,11 @@ class BearerAuthMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["path"] == "/mcp":
+            # The MCP handler is mounted at /mcp/; Starlette would otherwise
+            # answer /mcp with a 307 redirect, and MCP clients drop the
+            # Authorization header when following it.
+            scope["path"] = "/mcp/"
         if scope["type"] == "http" and API_KEY and scope["path"] not in PUBLIC_PATHS:
             auth = ""
             for name, value in scope.get("headers", []):
