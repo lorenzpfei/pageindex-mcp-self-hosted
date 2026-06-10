@@ -52,14 +52,17 @@ def build_tree(doc_id: str) -> None:
 
         # Cache page texts when OCR changed them: get_page_content() would
         # otherwise re-extract the sparse original at query time.
+        pages_file = os.path.join(store.TREE_DIR, f"{doc_id}.pages.json")
         pages_path = ""
         if ocr_pages:
-            pages_path = os.path.join(store.TREE_DIR, f"{doc_id}.pages.json")
-            with open(pages_path, "w", encoding="utf-8") as f:
+            pages_path = pages_file
+            with open(pages_file, "w", encoding="utf-8") as f:
                 json.dump(
                     [{"page": i + 1, "content": text} for i, (text, _) in enumerate(page_list)],
                     f, ensure_ascii=False,
                 )
+        elif os.path.isfile(pages_file):  # stale cache from a previous ingest
+            os.remove(pages_file)
 
         store.update_document(
             doc_id,

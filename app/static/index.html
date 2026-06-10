@@ -176,6 +176,7 @@ function render() {
       </div>
       ${badge(d)}
       ${d.status === "failed" ? `<button class="icon" data-retrydoc="${esc(d.doc_id)}" title="Retry ingest">↻</button>` : ""}
+      ${d.status === "done" && d.type !== "text" ? `<button class="icon" data-retrydoc="${esc(d.doc_id)}" data-confirm="${esc(d.doc_name)}" title="Re-index (runs LLM ingest again)">↻</button>` : ""}
       <button class="icon danger" data-deldoc="${esc(d.doc_id)}" title="Delete document">✕</button>
     </div>`;
   }
@@ -210,6 +211,7 @@ function render() {
     };
   for (const el of $("list").querySelectorAll("[data-retrydoc]"))
     el.onclick = async () => {
+      if (el.dataset.confirm && !confirm(`Re-index "${el.dataset.confirm}"?\n\nThis re-runs the LLM ingest (small API cost) and replaces the current index. The document is unavailable to clients until it finishes.`)) return;
       const r = await api("/api/documents/" + encodeURIComponent(el.dataset.retrydoc) + "/retry", { method: "POST" });
       if (!r.ok) alert((await r.json()).error || "Retry failed");
       refresh();
