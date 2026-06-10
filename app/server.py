@@ -24,6 +24,7 @@ from starlette.responses import FileResponse, JSONResponse, PlainTextResponse  #
 from starlette.routing import Route  # noqa: E402
 
 from pageindex.retrieve import (  # noqa: E402
+    _parse_pages,
     get_document as _get_document,
     get_document_structure as _get_document_structure,
     get_page_content as _get_page_content,
@@ -32,6 +33,7 @@ from pageindex.utils import get_number_of_pages  # noqa: E402
 
 import jobs  # noqa: E402
 import store  # noqa: E402
+import textfiles  # noqa: E402
 
 API_KEY = os.environ.get("PAGEINDEX_MCP_API_KEY")
 HOST = os.environ.get("HOST", "0.0.0.0")
@@ -68,27 +70,34 @@ def _doc_info_or_error(doc_id: str):
 
 @mcp.tool()
 def list_documents() -> str:
-    """List all documents with id, name, description, project (folder), page count, and ingest status.
+    """List all documents with id, name, description, project (folder), type, size, and ingest status.
 
-    Only documents with status "done" can be read with the other tools.
+    type is "pdf" (sized in pages) or "text" (plain-text files like code,
+    notebooks, markdown - sized in lines). Only documents with status "done"
+    can be read with the other tools.
     """
-    items = [
-        {
+    items = []
+    for doc_id, entry in store.load_registry().items():
+        item = {
             "doc_id": doc_id,
             "doc_name": entry.get("doc_name", ""),
             "doc_description": entry.get("doc_description", ""),
             "project": entry.get("project", ""),
-            "page_count": entry.get("page_count"),
+            "type": entry.get("type", "pdf"),
             "status": entry.get("status", "done"),
         }
-        for doc_id, entry in store.load_registry().items()
-    ]
+        if item["type"] == "text":
+            item["line_count"] = entry.get("line_count")
+        else:
+            item["page_count"] = entry.get("page_count")
+        items.append(item)
     return json.dumps(items, ensure_ascii=False)
 
 
 @mcp.tool()
 def get_document(doc_id: str) -> str:
-    """Get metadata for a document: doc_id, doc_name, doc_description, page_count."""
+    """Get metadata for a document: doc_id, doc_name, doc_description, type,
+    and page_count (pdf) or line_count (text)."""
     doc_info, error = _doc_info_or_error(doc_id)
     if error:
         return error
@@ -99,12 +108,18 @@ def get_document(doc_id: str) -> str:
 def get_document_structure(doc_id: str) -> str:
     """Get the hierarchical tree structure (titles, sections, summaries, page ranges) of a document.
 
-    For documents over ~20 pages, call this first to find relevant sections,
-    then use get_page_content() with targeted page ranges.
+    For PDFs over ~20 pages, call this first to find relevant sections, then
+    use get_page_content() with targeted page ranges. Text documents have no
+    tree - this returns a single section spanning all lines; just fetch the
+    line ranges you need via get_page_content().
     """
     doc_info, error = _doc_info_or_error(doc_id)
     if error:
         return error
+    if doc_info.get("type") == "text":
+        return json.dumps(
+            [{"title": doc_info.get("doc_name", doc_id), "start_line": 1, "end_line": doc_info.get("line_count")}]
+        )
     return _get_document_structure(documents={doc_id: doc_info}, doc_id=doc_id)
 
 
@@ -112,11 +127,19 @@ def get_document_structure(doc_id: str) -> str:
 def get_page_content(doc_id: str, pages: str) -> str:
     """Get the text content of specific pages of a document.
 
-    pages format: '5-7', '3,8', or '12' (1-indexed physical PDF page numbers).
+    pages format: '5-7', '3,8', or '12'. For PDFs these are 1-indexed physical
+    page numbers; for text documents they are 1-indexed line numbers (e.g.
+    '1-200' for the first 200 lines).
     """
     doc_info, error = _doc_info_or_error(doc_id)
     if error:
         return error
+    if doc_info.get("type") == "text":
+        try:
+            line_nums = _parse_pages(pages)
+        except (ValueError, AttributeError) as e:
+            return json.dumps({"error": f'Invalid pages format: {pages!r}. Use "5-7", "3,8", or "12". Error: {e}'})
+        return textfiles.line_content(doc_info["path"], line_nums)
     return _get_page_content(documents={doc_id: doc_info}, doc_id=doc_id, pages=pages)
 
 
@@ -137,7 +160,9 @@ async def api_state(request):
             "doc_id": doc_id,
             "doc_name": e.get("doc_name", ""),
             "project": e.get("project", ""),
+            "type": e.get("type", "pdf"),
             "page_count": e.get("page_count"),
+            "line_count": e.get("line_count"),
             "status": e.get("status", "done"),
             "error": e.get("error", ""),
             "uploaded_at": e.get("uploaded_at", ""),
@@ -178,6 +203,8 @@ async def api_retry_document(request):
     entry = store.load_registry().get(doc_id)
     if not entry:
         return JSONResponse({"error": "not found"}, status_code=404)
+    if entry.get("type", "pdf") == "text":
+        return JSONResponse({"error": "text documents are not ingested"}, status_code=400)
     if entry.get("status") == "processing":
         return JSONResponse({"error": "already processing"}, status_code=409)
     if not os.path.isfile(entry.get("pdf_path", "")):
@@ -200,10 +227,27 @@ async def api_upload(request):
     project = (form.get("project") or "").strip()
     if upload is None or not getattr(upload, "filename", None):
         return JSONResponse({"error": "missing file"}, status_code=400)
-    if not upload.filename.lower().endswith(".pdf"):
-        return JSONResponse({"error": "only PDF files are supported"}, status_code=400)
 
     doc_id = store.unique_doc_id(store.slugify(upload.filename))
+
+    # Anything that isn't a PDF is treated as plain text (code, notebooks,
+    # markdown, ...): stored without LLM ingest, immediately "done".
+    if not upload.filename.lower().endswith(".pdf"):
+        raw = await upload.read(textfiles.MAX_TEXT_BYTES + 1)
+        try:
+            text = textfiles.convert_upload(upload.filename, raw)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        os.makedirs(store.FILES_DIR, exist_ok=True)
+        path = os.path.join(store.FILES_DIR, f"{doc_id}.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        store.create_document(
+            doc_id, doc_name=upload.filename, project=project, pdf_path=path,
+            page_count=None, doc_type="text", line_count=text.count("\n") + 1, status="done",
+        )
+        return JSONResponse({"doc_id": doc_id, "status": "done"}, status_code=201)
+
     os.makedirs(store.PDF_DIR, exist_ok=True)
     pdf_path = os.path.join(store.PDF_DIR, f"{doc_id}.pdf")
     with open(pdf_path, "wb") as f:

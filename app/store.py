@@ -1,12 +1,15 @@
-"""Document registry: tracks projects and ingested PDFs with their tree structures.
+"""Document registry: tracks projects, ingested PDFs, and plain-text files.
 
 Layout under DATA_DIR:
   pdfs/<doc_id>.pdf       - original PDF
+  files/<doc_id>.txt      - plain-text documents (stored as-is, no tree)
   trees/<doc_id>.json     - PageIndex tree structure (output of page_index_main)
   documents.json          - {"projects": [...], "documents": {doc_id: {...}}}
 
-Document entry fields: doc_name, doc_description, project, pdf_path, tree_path,
-page_count, status ("processing" | "done" | "failed"), error, uploaded_at.
+Document entry fields: type ("pdf" | "text", missing means "pdf"), doc_name,
+doc_description, project, pdf_path (stored file path for all types), tree_path,
+page_count, line_count (text only), status ("processing" | "done" | "failed"),
+error, uploaded_at.
 """
 import json
 import os
@@ -16,6 +19,7 @@ from datetime import datetime, timezone
 
 DATA_DIR = os.environ.get("PAGEINDEX_DATA_DIR", "/data")
 PDF_DIR = os.path.join(DATA_DIR, "pdfs")
+FILES_DIR = os.path.join(DATA_DIR, "files")
 TREE_DIR = os.path.join(DATA_DIR, "trees")
 REGISTRY_PATH = os.path.join(DATA_DIR, "documents.json")
 
@@ -106,15 +110,26 @@ def unique_doc_id(base: str) -> str:
         return doc_id
 
 
-def create_document(doc_id: str, doc_name: str, project: str, pdf_path: str, page_count: int | None) -> dict:
+def create_document(
+    doc_id: str,
+    doc_name: str,
+    project: str,
+    pdf_path: str,
+    page_count: int | None,
+    doc_type: str = "pdf",
+    line_count: int | None = None,
+    status: str = "processing",
+) -> dict:
     entry = {
+        "type": doc_type,
         "doc_name": doc_name,
         "doc_description": "",
         "project": project,
         "pdf_path": pdf_path,
         "tree_path": "",
         "page_count": page_count,
-        "status": "processing",
+        "line_count": line_count,
+        "status": status,
         "error": "",
         "uploaded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
@@ -150,11 +165,20 @@ def delete_document(doc_id: str) -> dict | None:
 def load_doc_info(doc_id: str) -> dict | None:
     """Build the doc_info dict expected by pageindex.retrieve functions.
 
-    Only valid for documents with status "done" (the tree file must exist).
+    Only valid for documents with status "done" (for PDFs, the tree file must
+    exist; text documents have no tree).
     """
     entry = load_registry().get(doc_id)
     if not entry or entry.get("status") != "done":
         return None
+    if entry.get("type", "pdf") == "text":
+        return {
+            "type": "text",
+            "path": entry["pdf_path"],
+            "doc_name": entry.get("doc_name", ""),
+            "doc_description": entry.get("doc_description", ""),
+            "line_count": entry.get("line_count"),
+        }
     with open(entry["tree_path"], "r", encoding="utf-8") as f:
         tree = json.load(f)
     return {

@@ -15,10 +15,17 @@ How it works:
   `get_document_structure`, `get_page_content` as MCP tools over streamable
   HTTP, protected by a bearer token. The connecting agent (e.g. Claude) does
   the navigation/reasoning itself - serving is free after ingest.
+- **Text files**: anything that isn't a PDF (code, Jupyter notebooks,
+  markdown, any UTF-8 file up to 10 MB) is stored as plain text without LLM
+  ingest - instantly available, zero cost. The same MCP tools serve them,
+  with 1-indexed line numbers taking the role of page numbers (e.g.
+  `get_page_content(doc_id, "1-200")` returns the first 200 lines).
+  Notebook outputs are stripped on upload; only markdown and code cells are
+  kept.
 - **Web UI** (`/`): minimal document manager - create folders (projects),
-  upload PDFs (ingest runs in a background worker, one at a time), watch
-  processing status, delete documents. Unlock with the same bearer token;
-  it is kept in the browser's localStorage.
+  upload PDFs and text files (PDF ingest runs in a background worker, one at
+  a time), watch processing status, delete documents. Unlock with the same
+  bearer token; it is kept in the browser's localStorage.
 
 ## Setup
 
@@ -32,9 +39,10 @@ How it works:
    docker compose up -d --build
    ```
 
-3. Upload PDFs via the web UI at `https://<your-domain>/` (unlock with the
-   `PAGEINDEX_MCP_API_KEY`). Ingest runs in the background; the list shows
-   processing/done/failed per document.
+3. Upload PDFs and text files via the web UI at `https://<your-domain>/`
+   (unlock with the `PAGEINDEX_MCP_API_KEY`). PDF ingest runs in the
+   background; the list shows processing/done/failed per document. Text
+   files are done immediately.
 
    Alternatively via CLI inside the container:
 

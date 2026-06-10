@@ -82,12 +82,12 @@
   </header>
 
   <div class="toolbar">
-    <button id="uploadBtn">⬆ Upload PDF</button>
+    <button id="uploadBtn">⬆ Upload</button>
     <button id="newProjectBtn">＋ New folder</button>
     <span class="spacer"></span>
     <input type="search" id="search" placeholder="Search">
   </div>
-  <input type="file" id="file" accept="application/pdf" multiple hidden>
+  <input type="file" id="file" multiple hidden>
 
   <nav class="crumbs" id="crumbs"></nav>
   <div id="drop"><div id="list"></div></div>
@@ -167,11 +167,12 @@ function render() {
     }
   }
   for (const d of docs) {
+    const size = d.type === "text" ? `${d.line_count ?? "?"} lines` : `${d.page_count ?? "?"} pages`;
     html += `<div class="row">
-      <div class="ico">📄</div>
+      <div class="ico">${d.type === "text" ? "📝" : "📄"}</div>
       <div class="main">
         <div class="name" title="${esc(d.doc_name)}">${esc(d.doc_name)}</div>
-        <div class="meta">${d.page_count ?? "?"} pages · ${fmtDate(d.uploaded_at)}</div>
+        <div class="meta">${size} · ${fmtDate(d.uploaded_at)}</div>
       </div>
       ${badge(d)}
       ${d.status === "failed" ? `<button class="icon" data-retrydoc="${esc(d.doc_id)}" title="Retry ingest">↻</button>` : ""}
@@ -187,7 +188,7 @@ function render() {
       <span class="badge uploading">uploading…</span>
     </div>`;
   }
-  $("list").innerHTML = html || `<div class="empty">${currentProject === null ? "No folders or files yet. Upload a PDF to get started." : "Empty folder. Drop a PDF here."}</div>`;
+  $("list").innerHTML = html || `<div class="empty">${currentProject === null ? "No folders or files yet. Upload a PDF or text file to get started." : "Empty folder. Drop files here."}</div>`;
 
   $("crumbs").innerHTML = currentProject === null
     ? `<span class="cur">My Documents</span>`
@@ -258,7 +259,7 @@ $("search").oninput = render;
 const drop = $("drop");
 for (const ev of ["dragenter", "dragover"]) drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("drag"); });
 for (const ev of ["dragleave", "drop"]) drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("drag"); });
-drop.addEventListener("drop", e => uploadFiles([...e.dataTransfer.files].filter(f => f.name.toLowerCase().endsWith(".pdf"))));
+drop.addEventListener("drop", e => uploadFiles([...e.dataTransfer.files]));
 
 if (token) unlock(token); else showGate();
 </script>
