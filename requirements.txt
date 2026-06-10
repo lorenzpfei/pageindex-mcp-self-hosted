@@ -5,7 +5,8 @@ PyPDF2==3.0.1
 python-dotenv==1.0.1  # litellm 1.83.7 pins exactly this version
 pyyaml==6.0.2
 
-# MCP server
+# MCP server + web UI
 mcp==1.9.4
 starlette==0.47.1
 uvicorn==0.34.2
+python-multipart==0.0.20

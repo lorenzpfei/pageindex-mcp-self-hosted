@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PageIndex</title>
+<style>
+  :root {
+    --fg: #18181b; --muted: #71717a; --border: #e4e4e7; --bg-hover: #f4f4f5;
+    --blue: #2563eb; --green: #16a34a; --red: #dc2626; --amber: #d97706;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; color: var(--fg); background: #fff;
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 24px 16px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
+  header h1 { font-size: 18px; margin: 0; }
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .toolbar .spacer { flex: 1; }
+  button, input[type=password], input[type=search] {
+    font: inherit; border: 1px solid var(--border); border-radius: 8px;
+    padding: 7px 12px; background: #fff; color: var(--fg);
+  }
+  button { cursor: pointer; box-shadow: 0 1px 2px rgba(0,0,0,.05); white-space: nowrap; }
+  button:hover { background: var(--bg-hover); }
+  button.danger { color: var(--red); }
+  button.icon { border: 0; box-shadow: none; padding: 4px 8px; background: transparent; color: var(--muted); }
+  button.icon:hover { color: var(--fg); background: var(--bg-hover); }
+  input[type=search] { width: 220px; background: #fafafa; }
+  nav.crumbs { margin: 4px 0 10px; color: var(--muted); user-select: none; }
+  nav.crumbs a { color: inherit; text-decoration: none; cursor: pointer; }
+  nav.crumbs a:hover { color: var(--fg); }
+  nav.crumbs .cur { color: var(--fg); }
+  .row {
+    display: flex; align-items: center; gap: 12px; padding: 10px 12px;
+    border-radius: 10px; cursor: default;
+  }
+  .row.clickable { cursor: pointer; }
+  .row:hover { background: var(--bg-hover); }
+  .row .ico { font-size: 22px; width: 28px; text-align: center; flex: none; }
+  .row .main { flex: 1; min-width: 0; }
+  .row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .meta { font-size: 12px; color: var(--muted); }
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 500; flex: none; }
+  .badge.processing { color: var(--amber); background: #fef3c7; }
+  .badge.done { color: var(--green); background: #dcfce7; }
+  .badge.failed { color: var(--red); background: #fee2e2; cursor: help; }
+  .empty { color: var(--muted); text-align: center; padding: 48px 0; }
+  #drop.drag { outline: 2px dashed var(--blue); outline-offset: -2px; border-radius: 12px; background: #eff6ff; }
+  /* token gate */
+  #gate { max-width: 360px; margin: 18vh auto 0; padding: 0 16px; }
+  #gate h1 { font-size: 18px; }
+  #gate form { display: flex; gap: 8px; }
+  #gate input { flex: 1; }
+  #gate .err { color: var(--red); font-size: 13px; min-height: 20px; }
+  #gate p { color: var(--muted); font-size: 13px; }
+  .primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+  .primary:hover { background: #1d4ed8; }
+</style>
+</head>
+<body>
+
+<div id="gate" hidden>
+  <h1>PageIndex</h1>
+  <p>Enter the API key (<code>PAGEINDEX_MCP_API_KEY</code>). It is stored in this browser only.</p>
+  <form id="gateForm">
+    <input type="password" id="gateToken" placeholder="API key" autocomplete="current-password">
+    <button class="primary" type="submit">Unlock</button>
+  </form>
+  <div class="err" id="gateErr"></div>
+</div>
+
+<div class="wrap" id="ui" hidden>
+  <header>
+    <h1>📑 PageIndex</h1>
+    <button class="icon" id="lock" title="Forget API key in this browser">Log out</button>
+  </header>
+
+  <div class="toolbar">
+    <button id="uploadBtn">⬆ Upload PDF</button>
+    <button id="newProjectBtn">＋ New folder</button>
+    <span class="spacer"></span>
+    <input type="search" id="search" placeholder="Search">
+  </div>
+  <input type="file" id="file" accept="application/pdf" multiple hidden>
+
+  <nav class="crumbs" id="crumbs"></nav>
+  <div id="drop"><div id="list"></div></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let token = localStorage.getItem("pageindex_token") || "";
+let state = { projects: [], documents: [] };
+let currentProject = null;   // null = root
+let pollTimer = null;
+
+function api(path, opts = {}) {
+  opts.headers = Object.assign({ "Authorization": "Bearer " + token }, opts.headers || {});
+  return fetch(path, opts).then(r => {
+    if (r.status === 401) { showGate("Invalid API key"); throw new Error("unauthorized"); }
+    return r;
+  });
+}
+
+function showGate(err) {
+  clearInterval(pollTimer);
+  $("ui").hidden = true; $("gate").hidden = false;
+  $("gateErr").textContent = err || "";
+  $("gateToken").focus();
+}
+
+async function unlock(t) {
+  token = t;
+  try {
+    const r = await fetch("/api/state", { headers: { "Authorization": "Bearer " + token } });
+    if (!r.ok) { showGate("Invalid API key"); return; }
+    state = await r.json();
+    localStorage.setItem("pageindex_token", token);
+    $("gate").hidden = true; $("ui").hidden = false;
+    render();
+    pollTimer = setInterval(refresh, 5000);
+  } catch (e) { showGate("Server not reachable"); }
+}
+
+async function refresh() {
+  try { state = await (await api("/api/state")).json(); render(); } catch (e) {}
+}
+
+function fmtDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d) ? "" : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function badge(doc) {
+  if (doc.status === "processing") return `<span class="badge processing">processing…</span>`;
+  if (doc.status === "failed") return `<span class="badge failed" title="${esc(doc.error)}">failed</span>`;
+  return `<span class="badge done">done</span>`;
+}
+
+function esc(s) { return (s || "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+function render() {
+  const q = $("search").value.trim().toLowerCase();
+  const docs = state.documents.filter(d =>
+    (currentProject === null ? !d.project : d.project === currentProject) &&
+    (!q || d.doc_name.toLowerCase().includes(q)));
+  let html = "";
+
+  if (currentProject === null) {
+    const projects = state.projects.filter(p => !q || p.toLowerCase().includes(q));
+    for (const p of projects) {
+      const n = state.documents.filter(d => d.project === p).length;
+      html += `<div class="row clickable" data-project="${esc(p)}">
+        <div class="ico">📁</div>
+        <div class="main"><div class="name">${esc(p)}</div><div class="meta">${n} file${n === 1 ? "" : "s"}</div></div>
+        ${n === 0 ? `<button class="icon danger" data-delproject="${esc(p)}" title="Delete empty folder">✕</button>` : ""}
+      </div>`;
+    }
+  }
+  for (const d of docs) {
+    html += `<div class="row">
+      <div class="ico">📄</div>
+      <div class="main">
+        <div class="name" title="${esc(d.doc_name)}">${esc(d.doc_name)}</div>
+        <div class="meta">${d.page_count ?? "?"} pages · ${fmtDate(d.uploaded_at)}</div>
+      </div>
+      ${badge(d)}
+      <button class="icon danger" data-deldoc="${esc(d.doc_id)}" title="Delete document">✕</button>
+    </div>`;
+  }
+  $("list").innerHTML = html || `<div class="empty">${currentProject === null ? "No folders or files yet. Upload a PDF to get started." : "Empty folder. Drop a PDF here."}</div>`;
+
+  $("crumbs").innerHTML = currentProject === null
+    ? `<span class="cur">My Documents</span>`
+    : `<a id="goRoot">My Documents</a> › <span class="cur">📁 ${esc(currentProject)}</span>`;
+  const root = $("goRoot");
+  if (root) root.onclick = () => { currentProject = null; render(); };
+
+  for (const el of $("list").querySelectorAll("[data-project]"))
+    el.onclick = e => { if (e.target.dataset.delproject) return; currentProject = el.dataset.project; render(); };
+  for (const el of $("list").querySelectorAll("[data-delproject]"))
+    el.onclick = async () => {
+      if (!confirm(`Delete empty folder "${el.dataset.delproject}"?`)) return;
+      await api("/api/projects/" + encodeURIComponent(el.dataset.delproject), { method: "DELETE" });
+      refresh();
+    };
+  for (const el of $("list").querySelectorAll("[data-deldoc]"))
+    el.onclick = async () => {
+      if (!confirm("Delete this document (PDF + index)?")) return;
+      await api("/api/documents/" + encodeURIComponent(el.dataset.deldoc), { method: "DELETE" });
+      refresh();
+    };
+}
+
+async function uploadFiles(files) {
+  for (const f of files) {
+    const fd = new FormData();
+    fd.append("file", f);
+    fd.append("project", currentProject || "");
+    const r = await api("/api/upload", { method: "POST", body: fd });
+    if (!r.ok) alert(`Upload of ${f.name} failed: ${(await r.json()).error || r.status}`);
+  }
+  refresh();
+}
+
+$("gateForm").onsubmit = e => { e.preventDefault(); unlock($("gateToken").value.trim()); };
+$("lock").onclick = () => { localStorage.removeItem("pageindex_token"); token = ""; showGate(); };
+$("uploadBtn").onclick = () => $("file").click();
+$("file").onchange = () => { uploadFiles([...$("file").files]); $("file").value = ""; };
+$("newProjectBtn").onclick = async () => {
+  const name = prompt("Folder name:");
+  if (!name || !name.trim()) return;
+  await api("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: name.trim() }) });
+  refresh();
+};
+$("search").oninput = render;
+
+const drop = $("drop");
+for (const ev of ["dragenter", "dragover"]) drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("drag"); });
+for (const ev of ["dragleave", "drop"]) drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("drag"); });
+drop.addEventListener("drop", e => uploadFiles([...e.dataTransfer.files].filter(f => f.name.toLowerCase().endsWith(".pdf"))));
+
+if (token) unlock(token); else showGate();
+</script>
+</body>
+</html>

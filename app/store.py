@@ -1,41 +1,144 @@
-"""Document registry: tracks ingested PDFs and their PageIndex tree structures.
+"""Document registry: tracks projects and ingested PDFs with their tree structures.
 
 Layout under DATA_DIR:
   pdfs/<doc_id>.pdf       - original PDF
   trees/<doc_id>.json     - PageIndex tree structure (output of page_index_main)
-  documents.json          - registry: {doc_id: {doc_name, doc_description, pdf_path, tree_path}}
-"""
-from __future__ import annotations
+  documents.json          - {"projects": [...], "documents": {doc_id: {...}}}
 
+Document entry fields: doc_name, doc_description, project, pdf_path, tree_path,
+page_count, status ("processing" | "done" | "failed"), error, uploaded_at.
+"""
 import json
 import os
+import re
+import threading
+from datetime import datetime, timezone
 
 DATA_DIR = os.environ.get("PAGEINDEX_DATA_DIR", "/data")
 PDF_DIR = os.path.join(DATA_DIR, "pdfs")
 TREE_DIR = os.path.join(DATA_DIR, "trees")
 REGISTRY_PATH = os.path.join(DATA_DIR, "documents.json")
 
+_LOCK = threading.Lock()
 
-def load_registry() -> dict:
+
+def slugify(name: str) -> str:
+    base = os.path.splitext(os.path.basename(name))[0]
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", base).strip("-").lower()
+    return slug or "document"
+
+
+def _load_db() -> dict:
     if not os.path.isfile(REGISTRY_PATH):
-        return {}
+        return {"projects": [], "documents": {}}
     with open(REGISTRY_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    if "documents" not in data:  # legacy flat {doc_id: entry} format
+        data = {"projects": [], "documents": data}
+        for entry in data["documents"].values():
+            entry.setdefault("status", "done")
+    return data
 
 
-def save_registry(registry: dict) -> None:
+def _save_db(db: dict) -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
     tmp_path = REGISTRY_PATH + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(registry, f, ensure_ascii=False, indent=2)
+        json.dump(db, f, ensure_ascii=False, indent=2)
     os.replace(tmp_path, REGISTRY_PATH)
 
 
+def load_db() -> dict:
+    with _LOCK:
+        return _load_db()
+
+
+def load_registry() -> dict:
+    """All document entries: {doc_id: entry}."""
+    return load_db()["documents"]
+
+
+def add_project(name: str) -> bool:
+    with _LOCK:
+        db = _load_db()
+        if name in db["projects"]:
+            return False
+        db["projects"].append(name)
+        _save_db(db)
+        return True
+
+
+def remove_project(name: str) -> bool:
+    """Remove a project. Fails (returns False) if any document still uses it."""
+    with _LOCK:
+        db = _load_db()
+        if name not in db["projects"]:
+            return False
+        if any(e.get("project") == name for e in db["documents"].values()):
+            return False
+        db["projects"].remove(name)
+        _save_db(db)
+        return True
+
+
+def unique_doc_id(base: str) -> str:
+    with _LOCK:
+        docs = _load_db()["documents"]
+        doc_id, n = base, 2
+        while doc_id in docs:
+            doc_id = f"{base}-{n}"
+            n += 1
+        return doc_id
+
+
+def create_document(doc_id: str, doc_name: str, project: str, pdf_path: str, page_count: int | None) -> dict:
+    entry = {
+        "doc_name": doc_name,
+        "doc_description": "",
+        "project": project,
+        "pdf_path": pdf_path,
+        "tree_path": "",
+        "page_count": page_count,
+        "status": "processing",
+        "error": "",
+        "uploaded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    with _LOCK:
+        db = _load_db()
+        if project and project not in db["projects"]:
+            db["projects"].append(project)
+        db["documents"][doc_id] = entry
+        _save_db(db)
+    return entry
+
+
+def update_document(doc_id: str, **fields) -> dict | None:
+    with _LOCK:
+        db = _load_db()
+        entry = db["documents"].get(doc_id)
+        if not entry:
+            return None
+        entry.update(fields)
+        _save_db(db)
+        return entry
+
+
+def delete_document(doc_id: str) -> dict | None:
+    with _LOCK:
+        db = _load_db()
+        entry = db["documents"].pop(doc_id, None)
+        if entry:
+            _save_db(db)
+        return entry
+
+
 def load_doc_info(doc_id: str) -> dict | None:
-    """Build the doc_info dict expected by pageindex.retrieve functions."""
-    registry = load_registry()
-    entry = registry.get(doc_id)
-    if not entry:
+    """Build the doc_info dict expected by pageindex.retrieve functions.
+
+    Only valid for documents with status "done" (the tree file must exist).
+    """
+    entry = load_registry().get(doc_id)
+    if not entry or entry.get("status") != "done":
         return None
     with open(entry["tree_path"], "r", encoding="utf-8") as f:
         tree = json.load(f)

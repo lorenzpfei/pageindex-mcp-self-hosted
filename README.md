@@ -15,6 +15,10 @@ How it works:
   `get_document_structure`, `get_page_content` as MCP tools over streamable
   HTTP, protected by a bearer token. The connecting agent (e.g. Claude) does
   the navigation/reasoning itself - serving is free after ingest.
+- **Web UI** (`/`): minimal document manager - create folders (projects),
+  upload PDFs (ingest runs in a background worker, one at a time), watch
+  processing status, delete documents. Unlock with the same bearer token;
+  it is kept in the browser's localStorage.
 
 ## Setup
 
@@ -28,15 +32,18 @@ How it works:
    docker compose up -d --build
    ```
 
-3. Ingest a PDF (run inside the running container, or locally with the same deps):
+3. Upload PDFs via the web UI at `https://<your-domain>/` (unlock with the
+   `PAGEINDEX_MCP_API_KEY`). Ingest runs in the background; the list shows
+   processing/done/failed per document.
+
+   Alternatively via CLI inside the container:
 
    ```bash
-   docker compose exec pageindex-mcp python3 app/ingest.py /data/pdfs/lecture01.pdf
+   docker compose exec pageindex-mcp python3 app/ingest.py /data/pdfs/lecture01.pdf --project "Machine Learning"
    ```
 
-   Or copy the PDF into `./data/pdfs/` first, then run ingest with that path.
-   The tree structure is saved to `./data/trees/<doc_id>.json` and registered
-   in `./data/documents.json`.
+   Trees are saved to `<data>/trees/<doc_id>.json` and registered in
+   `<data>/documents.json`.
 
 ## Connecting an MCP client
 
