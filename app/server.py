@@ -5,9 +5,10 @@ Exposes the same browse/retrieve tools as PageIndex's hosted MCP, backed by
 locally generated tree structures (see ingest.py). Tree-building uses an LLM
 (OpenAI by default) once per document; serving these tools afterwards is free
 - the calling agent (e.g. Claude) does the reasoning/navigation itself.
-"""
-from __future__ import annotations
 
+Note: no `from __future__ import annotations` here - it turns annotations into
+strings, which breaks FastMCP's tool signature inspection in mcp 1.9.x.
+"""
 import json
 import os
 import secrets
