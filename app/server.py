@@ -166,6 +166,7 @@ async def api_state(request):
             "status": e.get("status", "done"),
             "error": e.get("error", ""),
             "uploaded_at": e.get("uploaded_at", ""),
+            "indexed_at": e.get("indexed_at", ""),
         }
         for doc_id, e in db["documents"].items()
     ]
@@ -205,13 +206,27 @@ async def api_retry_document(request):
         return JSONResponse({"error": "not found"}, status_code=404)
     if entry.get("type", "pdf") == "text":
         return JSONResponse({"error": "text documents are not ingested"}, status_code=400)
-    if entry.get("status") == "processing":
-        return JSONResponse({"error": "already processing"}, status_code=409)
+    if entry.get("status") in ("queued", "processing"):
+        return JSONResponse({"error": "already queued or processing"}, status_code=409)
     if not os.path.isfile(entry.get("pdf_path", "")):
         return JSONResponse({"error": "PDF file is missing - delete and re-upload"}, status_code=400)
-    store.update_document(doc_id, status="processing", error="")
+    store.update_document(doc_id, status="queued", error="")
     jobs.enqueue(doc_id)
-    return JSONResponse({"doc_id": doc_id, "status": "processing"})
+    return JSONResponse({"doc_id": doc_id, "status": "queued"})
+
+
+async def api_rename_document(request):
+    doc_id = request.path_params["doc_id"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    name = (body.get("name") or "").strip()
+    if not name or len(name) > 200:
+        return JSONResponse({"error": "invalid document name"}, status_code=400)
+    if not store.update_document(doc_id, doc_name=name):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"doc_id": doc_id, "doc_name": name})
 
 
 async def api_delete_project(request):
@@ -316,6 +331,7 @@ def build_app():
             Route("/api/projects/{name}", api_delete_project, methods=["DELETE"]),
             Route("/api/upload", api_upload, methods=["POST"]),
             Route("/api/documents/{doc_id}/retry", api_retry_document, methods=["POST"]),
+            Route("/api/documents/{doc_id}", api_rename_document, methods=["PATCH"]),
             Route("/api/documents/{doc_id}", api_delete_document, methods=["DELETE"]),
         ]
     )

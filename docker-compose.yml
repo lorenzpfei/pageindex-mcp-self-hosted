@@ -7,6 +7,10 @@ services:
     environment:
       - PAGEINDEX_DATA_DIR=/data
       - PORT=8000
+    # Cap memory so a heavy ingest can only OOM this container (which restarts
+    # and re-queues its work) instead of pushing the whole host into the global
+    # OOM killer and taking neighbouring containers down with it.
+    mem_limit: 2g
     volumes:
       # Dokploy re-clones the repo into the code dir on every deploy; ../files
       # is its stable per-app storage dir. For plain local use, ../files simply

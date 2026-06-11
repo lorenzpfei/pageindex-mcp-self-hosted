@@ -8,8 +8,8 @@ Layout under DATA_DIR:
 
 Document entry fields: type ("pdf" | "text", missing means "pdf"), doc_name,
 doc_description, project, pdf_path (stored file path for all types), tree_path,
-page_count, line_count (text only), status ("processing" | "done" | "failed"),
-error, uploaded_at.
+page_count, line_count (text only), status ("queued" | "processing" | "done" |
+"failed"), error, uploaded_at, indexed_at (last successful ingest).
 """
 import json
 import os
@@ -118,7 +118,7 @@ def create_document(
     page_count: int | None,
     doc_type: str = "pdf",
     line_count: int | None = None,
-    status: str = "processing",
+    status: str = "queued",
 ) -> dict:
     entry = {
         "type": doc_type,

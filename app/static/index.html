@@ -45,6 +45,7 @@
   .row .meta { font-size: 12px; color: var(--muted); }
   .badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 500; flex: none; }
   .badge.processing { color: var(--amber); background: #fef3c7; }
+  .badge.queued { color: var(--muted); background: #f4f4f5; }
   .badge.uploading { color: var(--blue); background: #dbeafe; animation: pulse 1.2s ease-in-out infinite; }
   .row.skeleton .ico, .row.skeleton .name { animation: pulse 1.2s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: .45; } }
@@ -140,6 +141,7 @@ function fmtDate(iso) {
 }
 
 function badge(doc) {
+  if (doc.status === "queued") return `<span class="badge queued">queued</span>`;
   if (doc.status === "processing") return `<span class="badge processing">processing…</span>`;
   if (doc.status === "failed") return `<span class="badge failed" title="${esc(doc.error)}">failed</span>`;
   return `<span class="badge done">done</span>`;
@@ -172,9 +174,10 @@ function render() {
       <div class="ico">${d.type === "text" ? "📝" : "📄"}</div>
       <div class="main">
         <div class="name" title="${esc(d.doc_name)}">${esc(d.doc_name)}</div>
-        <div class="meta">${size} · ${fmtDate(d.uploaded_at)}</div>
+        <div class="meta">${size} · ${fmtDate(d.uploaded_at)}${d.indexed_at ? ` · indexed ${fmtDate(d.indexed_at)}` : ""}</div>
       </div>
       ${badge(d)}
+      <button class="icon" data-rendoc="${esc(d.doc_id)}" data-name="${esc(d.doc_name)}" title="Rename document">✎</button>
       ${d.status === "failed" ? `<button class="icon" data-retrydoc="${esc(d.doc_id)}" title="Retry ingest">↻</button>` : ""}
       ${d.status === "done" && d.type !== "text" ? `<button class="icon" data-retrydoc="${esc(d.doc_id)}" data-confirm="${esc(d.doc_name)}" title="Re-index (runs LLM ingest again)">↻</button>` : ""}
       <button class="icon danger" data-deldoc="${esc(d.doc_id)}" title="Delete document">✕</button>
@@ -204,6 +207,16 @@ function render() {
       const name = prompt("New folder name:", el.dataset.renproject);
       if (!name || !name.trim() || name.trim() === el.dataset.renproject) return;
       const r = await api("/api/projects/" + encodeURIComponent(el.dataset.renproject), {
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: name.trim() })
+      });
+      if (!r.ok) alert((await r.json()).error || "Rename failed");
+      refresh();
+    };
+  for (const el of $("list").querySelectorAll("[data-rendoc]"))
+    el.onclick = async () => {
+      const name = prompt("New document name:", el.dataset.name);
+      if (!name || !name.trim() || name.trim() === el.dataset.name) return;
+      const r = await api("/api/documents/" + encodeURIComponent(el.dataset.rendoc), {
         method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: name.trim() })
       });
       if (!r.ok) alert((await r.json()).error || "Rename failed");
