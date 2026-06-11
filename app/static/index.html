@@ -62,6 +62,17 @@
   #gate p { color: var(--muted); font-size: 13px; }
   .primary { background: var(--blue); border-color: var(--blue); color: #fff; }
   .primary:hover { background: #1d4ed8; }
+  /* document detail modal */
+  #modal { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 10; }
+  #modal[hidden] { display: none; }
+  #modal .sheet { background: #fff; border-radius: 14px; max-width: 500px; width: 100%; padding: 20px; box-shadow: 0 10px 40px rgba(0,0,0,.2); }
+  #modal header { margin-bottom: 10px; }
+  #modal h2 { font-size: 16px; margin: 0; overflow-wrap: anywhere; }
+  #modal .desc { color: var(--muted); margin: 10px 0 0; max-height: 40vh; overflow: auto; }
+  #modal .err { color: var(--red); font-size: 13px; margin: 10px 0 0; overflow-wrap: anywhere; }
+  #mMeta { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px; margin: 14px 0 18px; }
+  #mMeta dt { color: var(--muted); }
+  #mMeta dd { margin: 0; }
 </style>
 </head>
 <body>
@@ -92,6 +103,17 @@
 
   <nav class="crumbs" id="crumbs"></nav>
   <div id="drop"><div id="list"></div></div>
+</div>
+
+<div id="modal" hidden>
+  <div class="sheet">
+    <header><h2 id="mTitle"></h2><span id="mBadge"></span></header>
+    <dl id="mMeta"></dl>
+    <button id="mOpen" class="primary"></button>
+    <button id="mClose">Close</button>
+    <p class="err" id="mErr" hidden></p>
+    <p class="desc" id="mDesc"></p>
+  </div>
 </div>
 
 <script>
@@ -140,6 +162,45 @@ function fmtDate(iso) {
   return isNaN(d) ? "" : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function fmtDateLong(iso) {
+  if (!iso) return "?";
+  const d = new Date(iso);
+  return isNaN(d) ? "?" : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+function openDetail(docId) {
+  const d = state.documents.find(x => x.doc_id === docId);
+  if (!d) return;
+  $("mTitle").textContent = d.doc_name;
+  $("mBadge").innerHTML = badge(d);
+  $("mDesc").textContent = d.doc_description || (d.type === "text" ? "" : "No description yet - it is generated during ingest.");
+  $("mErr").hidden = d.status !== "failed";
+  $("mErr").textContent = d.error || "";
+  const rows = [
+    [d.type === "text" ? "Total lines" : "Total pages", d.type === "text" ? d.line_count : d.page_count],
+    ["Uploaded on", fmtDateLong(d.uploaded_at)],
+  ];
+  if (d.indexed_at) rows.push(["Indexed on", fmtDateLong(d.indexed_at)]);
+  $("mMeta").innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${esc(String(v ?? "?"))}</dd>`).join("");
+  $("mOpen").textContent = d.type === "text" ? "Open file" : "Open PDF";
+  $("mOpen").onclick = () => openFile(d.doc_id);
+  $("modal").hidden = false;
+}
+
+async function openFile(docId) {
+  // Open the tab synchronously (popup blockers) and point it at a blob URL
+  // once the authenticated fetch is done.
+  const w = window.open("", "_blank");
+  try {
+    const r = await api("/api/documents/" + encodeURIComponent(docId) + "/file");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    w.location = URL.createObjectURL(await r.blob());
+  } catch (e) {
+    if (w) w.close();
+    alert("Could not load the file");
+  }
+}
+
 function badge(doc) {
   if (doc.status === "queued") return `<span class="badge queued">queued</span>`;
   if (doc.status === "processing") return `<span class="badge processing">processing…</span>`;
@@ -170,7 +231,7 @@ function render() {
   }
   for (const d of docs) {
     const size = d.type === "text" ? `${d.line_count ?? "?"} lines` : `${d.page_count ?? "?"} pages`;
-    html += `<div class="row">
+    html += `<div class="row clickable" data-doc="${esc(d.doc_id)}">
       <div class="ico">${d.type === "text" ? "📝" : "📄"}</div>
       <div class="main">
         <div class="name" title="${esc(d.doc_name)}">${esc(d.doc_name)}</div>
@@ -212,6 +273,8 @@ function render() {
       if (!r.ok) alert((await r.json()).error || "Rename failed");
       refresh();
     };
+  for (const el of $("list").querySelectorAll("[data-doc]"))
+    el.onclick = e => { if (e.target.closest("button")) return; openDetail(el.dataset.doc); };
   for (const el of $("list").querySelectorAll("[data-rendoc]"))
     el.onclick = async () => {
       const name = prompt("New document name:", el.dataset.name);
@@ -270,6 +333,8 @@ $("newProjectBtn").onclick = async () => {
   refresh();
 };
 $("search").oninput = render;
+$("mClose").onclick = () => { $("modal").hidden = true; };
+$("modal").onclick = e => { if (e.target === $("modal")) $("modal").hidden = true; };
 
 const drop = $("drop");
 for (const ev of ["dragenter", "dragover"]) drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("drag"); });

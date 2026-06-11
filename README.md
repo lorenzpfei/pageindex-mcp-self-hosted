@@ -28,9 +28,11 @@ How it works:
   Notebook outputs are stripped on upload; only markdown and code cells are
   kept.
 - **Web UI** (`/`): minimal document manager - create folders (projects),
-  upload PDFs and text files (PDF ingest runs in a background worker, one at
-  a time), watch processing status, delete documents. Unlock with the same
-  bearer token; it is kept in the browser's localStorage.
+  upload PDFs and text files (PDF ingest runs in background workers), watch
+  queued/processing status, rename and delete documents. Clicking a document
+  opens a detail view (description, dates) with a button to open the original
+  PDF/file in a new tab. Unlock with the same bearer token; it is kept in the
+  browser's localStorage.
 
 ## Setup
 

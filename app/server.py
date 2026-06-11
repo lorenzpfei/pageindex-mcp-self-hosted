@@ -159,6 +159,7 @@ async def api_state(request):
         {
             "doc_id": doc_id,
             "doc_name": e.get("doc_name", ""),
+            "doc_description": e.get("doc_description", ""),
             "project": e.get("project", ""),
             "type": e.get("type", "pdf"),
             "page_count": e.get("page_count"),
@@ -213,6 +214,23 @@ async def api_retry_document(request):
     store.update_document(doc_id, status="queued", error="")
     jobs.enqueue(doc_id)
     return JSONResponse({"doc_id": doc_id, "status": "queued"})
+
+
+async def api_document_file(request):
+    """Serve the stored original (PDF or text). The UI fetches it with the
+    bearer header and opens it as a blob URL - a plain browser tab couldn't
+    send the Authorization header itself."""
+    doc_id = request.path_params["doc_id"]
+    entry = store.load_registry().get(doc_id)
+    if not entry or not os.path.isfile(entry.get("pdf_path", "")):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    is_pdf = entry.get("type", "pdf") == "pdf"
+    return FileResponse(
+        entry["pdf_path"],
+        media_type="application/pdf" if is_pdf else "text/plain",
+        filename=entry.get("doc_name") or None,
+        content_disposition_type="inline",
+    )
 
 
 async def api_rename_document(request):
@@ -331,6 +349,7 @@ def build_app():
             Route("/api/projects/{name}", api_delete_project, methods=["DELETE"]),
             Route("/api/upload", api_upload, methods=["POST"]),
             Route("/api/documents/{doc_id}/retry", api_retry_document, methods=["POST"]),
+            Route("/api/documents/{doc_id}/file", api_document_file),
             Route("/api/documents/{doc_id}", api_rename_document, methods=["PATCH"]),
             Route("/api/documents/{doc_id}", api_delete_document, methods=["DELETE"]),
         ]
