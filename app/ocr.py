@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 import litellm
 import pymupdf
 
-from pageindex.utils import completion_kwargs, count_tokens, retry_sleep
+from pageindex.utils import _llm_slots, completion_kwargs, count_tokens, retry_sleep
 
 # Vision model for transcription (any LiteLLM model id); "off" disables OCR.
 MODEL = os.environ.get("PAGEINDEX_OCR_MODEL", "gemini/gemini-3.5-flash")
@@ -54,12 +54,17 @@ def _transcribe_page(pdf_path: str, page_index: int) -> str:
     ]}]
     for attempt in range(MAX_RETRIES):
         try:
-            response = litellm.completion(model=MODEL, messages=messages, **completion_kwargs(MODEL))
+            with _llm_slots:  # shared global cap, see pageindex.utils
+                response = litellm.completion(model=MODEL, messages=messages, **completion_kwargs(MODEL))
             return response.choices[0].message.content or ""
         except Exception as e:
             logging.error(f"OCR failed for page {page_index + 1}: {e}")
             if attempt < MAX_RETRIES - 1:
                 time.sleep(retry_sleep(attempt))
+            elif isinstance(e, litellm.RateLimitError):
+                # Out of quota: abort the ingest so jobs.py re-queues the
+                # document, instead of silently indexing it with blank pages.
+                raise
     return ""
 
 

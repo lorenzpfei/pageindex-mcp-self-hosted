@@ -2,6 +2,7 @@ import litellm
 import logging
 import os
 import textwrap
+import threading
 from datetime import datetime
 import time
 import json
@@ -43,33 +44,55 @@ def retry_sleep(attempt):
     return min(2 ** attempt, 60)
 
 
+# Cap concurrent LLM calls. Tree building fans out one task per TOC item /
+# page group, so a long book fires hundreds of requests at once - enough to
+# trip provider rate limits on its own (and the per-call retries then keep
+# the limit saturated). The sync semaphore is shared across ingest worker
+# and OCR threads; each ingest worker runs its own asyncio loop, so async
+# calls get a per-loop semaphore (stored on the loop, dies with it).
+MAX_CONCURRENT_LLM = max(1, int(os.getenv("PAGEINDEX_MAX_CONCURRENT_LLM", "8")))
+_llm_slots = threading.BoundedSemaphore(MAX_CONCURRENT_LLM)
+
+
+def _async_llm_slots():
+    loop = asyncio.get_running_loop()
+    sem = getattr(loop, "_pageindex_llm_slots", None)
+    if sem is None:
+        sem = asyncio.Semaphore(MAX_CONCURRENT_LLM)
+        loop._pageindex_llm_slots = sem
+    return sem
+
+
 def llm_completion(model, prompt, chat_history=None, return_finish_reason=False):
     if model:
         model = model.removeprefix("litellm/")
     max_retries = 10
     messages = list(chat_history) + [{"role": "user", "content": prompt}] if chat_history else [{"role": "user", "content": prompt}]
-    for i in range(max_retries):
-        try:
-            response = litellm.completion(
-                model=model,
-                messages=messages,
-                **completion_kwargs(model),
-            )
-            content = response.choices[0].message.content
-            if return_finish_reason:
-                finish_reason = "max_output_reached" if response.choices[0].finish_reason == "length" else "finished"
-                return content, finish_reason
-            return content
-        except Exception as e:
-            print('************* Retrying *************')
-            logging.error(f"Error: {e}")
-            if i < max_retries - 1:
-                time.sleep(retry_sleep(i))
-            else:
-                logging.error('Max retries reached for prompt: ' + prompt)
+    with _llm_slots:
+        for i in range(max_retries):
+            try:
+                response = litellm.completion(
+                    model=model,
+                    messages=messages,
+                    **completion_kwargs(model),
+                )
+                content = response.choices[0].message.content
                 if return_finish_reason:
-                    return "", "error"
-                return ""
+                    finish_reason = "max_output_reached" if response.choices[0].finish_reason == "length" else "finished"
+                    return content, finish_reason
+                return content
+            except Exception as e:
+                print('************* Retrying *************')
+                logging.error(f"Error: {e}")
+                if i < max_retries - 1:
+                    time.sleep(retry_sleep(i))
+                else:
+                    # Returning "" (upstream behaviour) poisons the pipeline
+                    # with empty JSON ("KeyError: toc_detected"). Raise so the
+                    # ingest fails with the real cause - and rate-limited
+                    # documents can be re-queued instead of marked failed.
+                    logging.error('Max retries reached for prompt: ' + prompt[:500])
+                    raise
 
 
 
@@ -78,22 +101,23 @@ async def llm_acompletion(model, prompt):
         model = model.removeprefix("litellm/")
     max_retries = 10
     messages = [{"role": "user", "content": prompt}]
-    for i in range(max_retries):
-        try:
-            response = await litellm.acompletion(
-                model=model,
-                messages=messages,
-                **completion_kwargs(model),
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            print('************* Retrying *************')
-            logging.error(f"Error: {e}")
-            if i < max_retries - 1:
-                await asyncio.sleep(retry_sleep(i))
-            else:
-                logging.error('Max retries reached for prompt: ' + prompt)
-                return ""
+    async with _async_llm_slots():
+        for i in range(max_retries):
+            try:
+                response = await litellm.acompletion(
+                    model=model,
+                    messages=messages,
+                    **completion_kwargs(model),
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                print('************* Retrying *************')
+                logging.error(f"Error: {e}")
+                if i < max_retries - 1:
+                    await asyncio.sleep(retry_sleep(i))
+                else:
+                    logging.error('Max retries reached for prompt: ' + prompt[:500])
+                    raise
             
             
 def get_json_content(response):

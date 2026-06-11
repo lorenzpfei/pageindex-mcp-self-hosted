@@ -41,8 +41,11 @@ How it works:
    - `PAGEINDEX_MCP_API_KEY` - bearer token clients must send, e.g. `openssl rand -hex 32`
    - optional: `PAGEINDEX_MODEL` (any LiteLLM model id for tree-building;
      default gemini/gemini-3.5-flash), `PAGEINDEX_OCR_MODEL` (vision model
-     for text-poor pages, "off" to disable) and `PAGEINDEX_INGEST_WORKERS`
-     (parallel PDF ingests, default 2)
+     for text-poor pages, "off" to disable), `PAGEINDEX_INGEST_WORKERS`
+     (parallel PDF ingests, default 2) and `PAGEINDEX_MAX_CONCURRENT_LLM`
+     (global cap on simultaneous LLM calls, default 8 - protects against
+     provider rate limits; if an ingest still gets rate limited it is
+     re-queued automatically with a growing cooldown)
 
 2. Build and start:
 

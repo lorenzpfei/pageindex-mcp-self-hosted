@@ -174,7 +174,7 @@ function openDetail(docId) {
   $("mTitle").textContent = d.doc_name;
   $("mBadge").innerHTML = badge(d);
   $("mDesc").textContent = d.doc_description || (d.type === "text" ? "" : "No description yet - it is generated during ingest.");
-  $("mErr").hidden = d.status !== "failed";
+  $("mErr").hidden = !d.error;  // failed docs, and rate-limit waits while queued
   $("mErr").textContent = d.error || "";
   const rows = [
     [d.type === "text" ? "Total lines" : "Total pages", d.type === "text" ? d.line_count : d.page_count],
@@ -202,7 +202,7 @@ async function openFile(docId) {
 }
 
 function badge(doc) {
-  if (doc.status === "queued") return `<span class="badge queued">queued</span>`;
+  if (doc.status === "queued") return `<span class="badge queued" title="${esc(doc.error)}">queued</span>`;
   if (doc.status === "processing") return `<span class="badge processing">processing…</span>`;
   if (doc.status === "failed") return `<span class="badge failed" title="${esc(doc.error)}">failed</span>`;
   return `<span class="badge done">done</span>`;

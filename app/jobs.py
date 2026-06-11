@@ -11,8 +11,11 @@ import os
 import queue
 import sys
 import threading
+import time
 import traceback
 from datetime import datetime, timezone
+
+import litellm
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -27,6 +30,40 @@ MODEL = os.environ.get("PAGEINDEX_MODEL", "")  # empty = pageindex/config.yaml d
 
 _queue: "queue.Queue[str]" = queue.Queue()
 _started = False
+
+# Rate-limit cooldown: when the provider still answers 429 after the
+# per-call exponential backoff in pageindex.utils, the quota is exhausted
+# for a while. Failing doc after doc would only burn more quota, so the
+# document goes back to "queued" and all workers hold off, doubling the
+# pause on every consecutive rate-limited ingest (reset on success).
+_rl_lock = threading.Lock()
+_rl_until = 0.0
+_rl_strikes = 0
+RL_COOLDOWN_MAX = 1800  # 30 min
+
+
+def _rate_limit_cooldown(doc_id: str, e: Exception) -> None:
+    global _rl_until, _rl_strikes
+    with _rl_lock:
+        _rl_strikes += 1
+        cooldown = min(60 * 2 ** _rl_strikes, RL_COOLDOWN_MAX)
+        _rl_until = max(_rl_until, time.time() + cooldown)
+    store.update_document(
+        doc_id,
+        status="queued",
+        error=f"LLM provider rate limit - retrying automatically in ~{cooldown // 60} min ({e})"[:500],
+    )
+    _queue.put(doc_id)
+    print(f"Rate limited during {doc_id}; re-queued, pausing ingest {cooldown}s", file=sys.stderr)
+
+
+def _rate_limit_wait() -> None:
+    """Block the worker until the current cooldown window (if any) is over."""
+    while True:
+        wait = _rl_until - time.time()
+        if wait <= 0:
+            return
+        time.sleep(min(wait, 30))
 
 
 class IngestError(Exception):
@@ -100,7 +137,13 @@ def build_tree(doc_id: str) -> None:
             indexed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         )
         print(f"Ingest done: {doc_id}")
+        global _rl_strikes
+        with _rl_lock:
+            _rl_strikes = 0
     except Exception as e:
+        if isinstance(e, litellm.RateLimitError) or "RateLimitError" in str(e):
+            _rate_limit_cooldown(doc_id, e)
+            return
         msg = str(e) if isinstance(e, IngestError) else f"{type(e).__name__}: {e}"
         store.update_document(doc_id, status="failed", error=msg)
         print(f"Ingest failed: {doc_id}", file=sys.stderr)
@@ -115,6 +158,7 @@ def _worker() -> None:
     while True:
         doc_id = _queue.get()
         try:
+            _rate_limit_wait()
             build_tree(doc_id)
         finally:
             _queue.task_done()
