@@ -91,9 +91,10 @@ async def check_title_appearance_in_start_concurrent(structure, page_list, model
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for item, result in zip(valid_items, results):
-        if isinstance(result, litellm.RateLimitError):
-            # Out of quota: every remaining item would fail too. Abort so the
-            # document can be re-queued instead of indexed in degraded form.
+        if isinstance(result, PROVIDER_BUSY_ERRORS):
+            # Provider busy (quota or overload): every remaining item would
+            # fail too. Abort so the document can be re-queued instead of
+            # indexed in degraded form.
             raise result
         if isinstance(result, Exception):
             if logger:
@@ -845,8 +846,8 @@ async def fix_incorrect_toc(toc_with_page_number, page_list, incorrect_results, 
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for item, result in zip(incorrect_results, results):
-        if isinstance(result, litellm.RateLimitError):
-            raise result  # out of quota - abort so the document gets re-queued
+        if isinstance(result, PROVIDER_BUSY_ERRORS):
+            raise result  # provider busy - abort so the document gets re-queued
         if isinstance(result, Exception):
             print(f"Processing item {item} generated an exception: {result}")
             continue

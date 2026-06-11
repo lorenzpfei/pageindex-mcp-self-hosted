@@ -15,12 +15,10 @@ import time
 import traceback
 from datetime import datetime, timezone
 
-import litellm
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pageindex import page_index_main  # noqa: E402
-from pageindex.utils import ConfigLoader, get_page_tokens  # noqa: E402
+from pageindex.utils import PROVIDER_BUSY_ERRORS, ConfigLoader, get_page_tokens  # noqa: E402
 
 import ocr  # noqa: E402
 import store  # noqa: E402
@@ -31,11 +29,11 @@ MODEL = os.environ.get("PAGEINDEX_MODEL", "")  # empty = pageindex/config.yaml d
 _queue: "queue.Queue[str]" = queue.Queue()
 _started = False
 
-# Rate-limit cooldown: when the provider still answers 429 after the
-# per-call exponential backoff in pageindex.utils, the quota is exhausted
-# for a while. Failing doc after doc would only burn more quota, so the
-# document goes back to "queued" and all workers hold off, doubling the
-# pause on every consecutive rate-limited ingest (reset on success).
+# Provider-busy cooldown: when the provider still answers 429 (quota) or 503
+# (overloaded) after the per-call exponential backoff in pageindex.utils, it
+# will stay that way for a while. Failing doc after doc would only burn more
+# quota, so the document goes back to "queued" and all workers hold off,
+# doubling the pause on every consecutive busy ingest (reset on success).
 _rl_lock = threading.Lock()
 _rl_until = 0.0
 _rl_strikes = 0
@@ -51,7 +49,7 @@ def _rate_limit_cooldown(doc_id: str, e: Exception) -> None:
     store.update_document(
         doc_id,
         status="queued",
-        error=f"LLM provider rate limit - retrying automatically in ~{cooldown // 60} min ({e})"[:500],
+        error=f"LLM provider busy (rate limit/overload) - retrying automatically in ~{cooldown // 60} min ({e})"[:500],
     )
     _queue.put(doc_id)
     print(f"Rate limited during {doc_id}; re-queued, pausing ingest {cooldown}s", file=sys.stderr)
@@ -141,7 +139,9 @@ def build_tree(doc_id: str) -> None:
         with _rl_lock:
             _rl_strikes = 0
     except Exception as e:
-        if isinstance(e, litellm.RateLimitError) or "RateLimitError" in str(e):
+        if isinstance(e, PROVIDER_BUSY_ERRORS) or any(
+            name in str(e) for name in ("RateLimitError", "ServiceUnavailableError")
+        ):
             _rate_limit_cooldown(doc_id, e)
             return
         msg = str(e) if isinstance(e, IngestError) else f"{type(e).__name__}: {e}"

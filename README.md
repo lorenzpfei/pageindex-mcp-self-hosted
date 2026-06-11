@@ -44,8 +44,9 @@ How it works:
      for text-poor pages, "off" to disable), `PAGEINDEX_INGEST_WORKERS`
      (parallel PDF ingests, default 2) and `PAGEINDEX_MAX_CONCURRENT_LLM`
      (global cap on simultaneous LLM calls, default 8 - protects against
-     provider rate limits; if an ingest still gets rate limited it is
-     re-queued automatically with a growing cooldown)
+     provider rate limits; if an ingest still hits a rate limit or the
+     model is overloaded, it is re-queued automatically with a growing
+     cooldown)
 
 2. Build and start:
 

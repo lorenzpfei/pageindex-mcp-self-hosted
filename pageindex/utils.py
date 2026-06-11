@@ -53,6 +53,12 @@ def retry_sleep(attempt):
 MAX_CONCURRENT_LLM = max(1, int(os.getenv("PAGEINDEX_MAX_CONCURRENT_LLM", "8")))
 _llm_slots = threading.BoundedSemaphore(MAX_CONCURRENT_LLM)
 
+# Errors meaning "the provider can't serve anyone right now": 429 (quota /
+# rate limit) and 503 (model overloaded). Per-page or per-section degradation
+# makes no sense for these - every remaining call would fail too - so callers
+# abort the ingest and let jobs.py re-queue the document with a cooldown.
+PROVIDER_BUSY_ERRORS = (litellm.RateLimitError, litellm.ServiceUnavailableError)
+
 
 def _async_llm_slots():
     loop = asyncio.get_running_loop()
