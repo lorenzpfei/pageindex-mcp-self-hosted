@@ -647,6 +647,15 @@ def process_toc_with_page_numbers(toc_content, toc_page_list, page_list, toc_che
     offset = calculate_page_offset(matching_pairs)
     logger.info(f'offset: {offset}')
 
+    if offset is None:
+        # No printed page number could be matched to a physical page (e.g. the
+        # index extractor found nothing, sometimes because the provider was
+        # overloaded). Without an offset we cannot anchor the TOC; returning it
+        # with no physical_index makes meta_processor fall back to the
+        # no-page-number path instead of crashing on `page + None`.
+        logger.info('offset is None - no matching pairs; falling back to no-page-number path')
+        return toc_with_page_number
+
     toc_with_page_number = add_page_offset_to_toc_json(toc_with_page_number, offset)
     logger.info(f'toc_with_page_number: {toc_with_page_number}')
 
