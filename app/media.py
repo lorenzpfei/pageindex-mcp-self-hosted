@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import shutil
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -163,14 +164,27 @@ def _process_page(doc_id: str, pdf_path: str, page: int) -> list | None:
         return figures
 
 
-def extract(doc_id: str, pdf_path: str) -> tuple[int, list[int]]:
+def extract(doc_id: str, pdf_path: str, on_progress=None) -> tuple[int, list[int]]:
     directory = doc_dir(doc_id)
     shutil.rmtree(directory, ignore_errors=True)
     os.makedirs(directory, exist_ok=True)
     with pymupdf.open(pdf_path) as pdf:
         pages = list(range(1, pdf.page_count + 1))
+    done, lock = 0, threading.Lock()
+
+    def process(page: int) -> list | None:
+        nonlocal done
+        result = _process_page(doc_id, pdf_path, page)
+        with lock:
+            done += 1
+            if on_progress:
+                on_progress(done, len(pages))
+        return result
+
+    if on_progress:
+        on_progress(0, len(pages))
     with ThreadPoolExecutor(max_workers=MAX_PARALLEL) as pool:
-        results = list(pool.map(lambda page: _process_page(doc_id, pdf_path, page), pages))
+        results = list(pool.map(process, pages))
     figures = [figure for result in results if result for figure in result]
     failed_pages = [page for page, result in zip(pages, results) if result is None]
     _write_atomic(

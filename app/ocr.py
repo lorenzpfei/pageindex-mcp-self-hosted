@@ -12,6 +12,7 @@ original extracted text.
 import base64
 import logging
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -69,7 +70,7 @@ def _transcribe_page(pdf_path: str, page_index: int) -> str:
     return ""
 
 
-def augment_page_list(pdf_path: str, page_list: list, model: str = None) -> tuple[list, int]:
+def augment_page_list(pdf_path: str, page_list: list, model: str = None, on_progress=None) -> tuple[list, int]:
     """Replace the text of text-poor pages with vision transcriptions.
 
     page_list is pageindex's [(page_text, token_count), ...], one tuple per
@@ -81,8 +82,21 @@ def augment_page_list(pdf_path: str, page_list: list, model: str = None) -> tupl
     if not sparse:
         return page_list, 0
 
+    done, lock = 0, threading.Lock()
+
+    def transcribe(i: int) -> str:
+        nonlocal done
+        text = _transcribe_page(pdf_path, i)
+        with lock:
+            done += 1
+            if on_progress:
+                on_progress(done, len(sparse))
+        return text
+
+    if on_progress:
+        on_progress(0, len(sparse))
     with ThreadPoolExecutor(max_workers=MAX_PARALLEL) as pool:
-        transcriptions = list(pool.map(lambda i: _transcribe_page(pdf_path, i), sparse))
+        transcriptions = list(pool.map(transcribe, sparse))
 
     out = list(page_list)
     transcribed = 0

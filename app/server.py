@@ -251,6 +251,7 @@ async def api_state(request):
             "media_status": e.get("media_status", ""),
             "media_error": e.get("media_error", ""),
             "figure_count": e.get("figure_count"),
+            "progress": jobs.progress(doc_id),
         }
         for doc_id, e in db["documents"].items()
     ]

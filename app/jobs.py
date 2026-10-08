@@ -30,6 +30,34 @@ MODEL = litellm_model(os.environ.get("PAGEINDEX_MODEL", ""))  # empty = pageinde
 _queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
 _started = False
 
+_progress_lock = threading.Lock()
+_progress: dict[str, dict] = {}
+
+
+def _set_progress(doc_id: str, phase: str, done: int | None = None, total: int | None = None) -> None:
+    with _progress_lock:
+        previous = _progress.get(doc_id)
+        started_at = previous["started_at"] if previous and previous["phase"] == phase else time.time()
+        _progress[doc_id] = {"phase": phase, "done": done, "total": total, "started_at": started_at}
+
+
+def _clear_progress(doc_id: str) -> None:
+    with _progress_lock:
+        _progress.pop(doc_id, None)
+
+
+def progress(doc_id: str) -> dict | None:
+    with _progress_lock:
+        current = _progress.get(doc_id)
+        if not current:
+            return None
+        return {
+            "phase": current["phase"],
+            "done": current["done"],
+            "total": current["total"],
+            "elapsed": round(time.time() - current["started_at"]),
+        }
+
 # Provider-busy cooldown: when the provider still answers 429 (quota) or 503
 # (overloaded) after the per-call exponential backoff in pageindex.utils, it
 # will stay that way for a while. Failing doc after doc would only burn more
@@ -100,8 +128,13 @@ def build_tree(doc_id: str) -> None:
         opt = ConfigLoader().load(overrides)
         _check_api_keys(opt.model, *([ocr.MODEL] if ocr.enabled() else []))
 
+        _set_progress(doc_id, "reading")
         page_list = get_page_tokens(entry["pdf_path"], model=opt.model)
-        page_list, ocr_pages = ocr.augment_page_list(entry["pdf_path"], page_list, model=opt.model)
+        page_list, ocr_pages = ocr.augment_page_list(
+            entry["pdf_path"], page_list, model=opt.model,
+            on_progress=lambda done, total: _set_progress(doc_id, "ocr", done, total),
+        )
+        _set_progress(doc_id, "tree")
         if ocr_pages:
             print(f"OCR transcribed {ocr_pages} text-poor page(s) for {doc_id}")
 
@@ -146,6 +179,8 @@ def build_tree(doc_id: str) -> None:
         store.update_document(doc_id, status="failed", error=msg)
         print(f"Ingest failed: {doc_id}", file=sys.stderr)
         traceback.print_exc()
+    finally:
+        _clear_progress(doc_id)
 
 
 def _is_provider_busy(e: Exception) -> bool:
@@ -167,7 +202,10 @@ def build_media(doc_id: str) -> None:
     store.update_document(doc_id, media_status="processing", media_error="")
     try:
         _check_api_keys(media.MODEL)
-        figure_count, failed_pages = media.extract(doc_id, entry["pdf_path"])
+        figure_count, failed_pages = media.extract(
+            doc_id, entry["pdf_path"],
+            on_progress=lambda done, total: _set_progress(doc_id, "figures", done, total),
+        )
         store.update_document(
             doc_id,
             media_status="done",
@@ -185,6 +223,8 @@ def build_media(doc_id: str) -> None:
         store.update_document(doc_id, media_status="failed", media_error=msg)
         print(f"Media failed: {doc_id}", file=sys.stderr)
         traceback.print_exc()
+    finally:
+        _clear_progress(doc_id)
 
 
 def enqueue(doc_id: str) -> None:
