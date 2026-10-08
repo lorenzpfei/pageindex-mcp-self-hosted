@@ -18,14 +18,14 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pageindex import page_index_main  # noqa: E402
-from pageindex.utils import PROVIDER_BUSY_ERRORS, ConfigLoader, get_page_tokens  # noqa: E402
+from pageindex.utils import PROVIDER_BUSY_ERRORS, ConfigLoader, get_page_tokens, litellm_model  # noqa: E402
 
 import media  # noqa: E402
 import ocr  # noqa: E402
 import store  # noqa: E402
 
 WORKERS = max(1, int(os.environ.get("PAGEINDEX_INGEST_WORKERS", "2")))
-MODEL = os.environ.get("PAGEINDEX_MODEL", "")  # empty = pageindex/config.yaml default
+MODEL = litellm_model(os.environ.get("PAGEINDEX_MODEL", ""))  # empty = pageindex/config.yaml default
 
 _queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
 _started = False

@@ -30,6 +30,12 @@ def count_tokens(text, model=None):
     return litellm.token_counter(model=model, text=text)
 
 
+def litellm_model(model):
+    if model and model.startswith("google/"):
+        return "gemini/" + model.removeprefix("google/")
+    return model
+
+
 def completion_kwargs(model):
     """Gemini 3 models degrade with temperature < 1.0 (LiteLLM warns about
     infinite loops / failures); keep the deterministic 0 only elsewhere."""

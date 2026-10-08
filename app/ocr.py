@@ -18,10 +18,10 @@ from concurrent.futures import ThreadPoolExecutor
 import litellm
 import pymupdf
 
-from pageindex.utils import PROVIDER_BUSY_ERRORS, _llm_slots, completion_kwargs, count_tokens, retry_sleep
+from pageindex.utils import PROVIDER_BUSY_ERRORS, _llm_slots, completion_kwargs, count_tokens, litellm_model, retry_sleep
 
 # Vision model for transcription (any LiteLLM model id); "off" disables OCR.
-MODEL = os.environ.get("PAGEINDEX_OCR_MODEL", "gemini/gemini-3.5-flash")
+MODEL = litellm_model(os.environ.get("PAGEINDEX_OCR_MODEL", "gemini/gemini-3.5-flash"))
 # Pages with fewer extracted characters than this are sent to the vision model.
 MIN_CHARS = int(os.environ.get("PAGEINDEX_OCR_MIN_CHARS", "100"))
 DPI = 150

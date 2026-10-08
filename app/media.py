@@ -11,11 +11,11 @@ from concurrent.futures import ThreadPoolExecutor
 import litellm
 import pymupdf
 
-from pageindex.utils import PROVIDER_BUSY_ERRORS, _llm_slots, completion_kwargs, retry_sleep
+from pageindex.utils import PROVIDER_BUSY_ERRORS, _llm_slots, completion_kwargs, litellm_model, retry_sleep
 
 import store
 
-MODEL = os.environ.get("PAGEINDEX_FIGURE_MODEL", "gemini/gemini-3.8-flash")
+MODEL = litellm_model(os.environ.get("PAGEINDEX_FIGURE_MODEL", "gemini/gemini-3.8-flash"))
 MEDIA_DIR = os.path.join(store.DATA_DIR, "media")
 PAGE_WIDTH = 1200
 PAGE_QUALITY = 78
