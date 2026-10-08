@@ -19,8 +19,8 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from mcp.server.fastmcp import FastMCP  # noqa: E402
-from starlette.responses import FileResponse, JSONResponse, PlainTextResponse  # noqa: E402
+from mcp.server.fastmcp import FastMCP, Image  # noqa: E402
+from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, Response  # noqa: E402
 from starlette.routing import Route  # noqa: E402
 
 from pageindex.retrieve import (  # noqa: E402
@@ -32,6 +32,7 @@ from pageindex.retrieve import (  # noqa: E402
 from pageindex.utils import get_number_of_pages  # noqa: E402
 
 import jobs  # noqa: E402
+import media  # noqa: E402
 import store  # noqa: E402
 import textfiles  # noqa: E402
 
@@ -130,6 +131,9 @@ def get_page_content(doc_id: str, pages: str) -> str:
     pages format: '5-7', '3,8', or '12'. For PDFs these are 1-indexed physical
     page numbers; for text documents they are 1-indexed line numbers (e.g.
     '1-200' for the first 200 lines).
+
+    PDF pages list their extracted figures (id, kind, caption) under
+    "figures"; fetch one with get_document_image(doc_id, id).
     """
     doc_info, error = _doc_info_or_error(doc_id)
     if error:
@@ -140,7 +144,83 @@ def get_page_content(doc_id: str, pages: str) -> str:
         except (ValueError, AttributeError) as e:
             return json.dumps({"error": f'Invalid pages format: {pages!r}. Use "5-7", "3,8", or "12". Error: {e}'})
         return textfiles.line_content(doc_info["path"], line_nums)
-    return _get_page_content(documents={doc_id: doc_info}, doc_id=doc_id, pages=pages)
+    content = _get_page_content(documents={doc_id: doc_info}, doc_id=doc_id, pages=pages)
+    return _with_figures(doc_id, content)
+
+
+def _with_figures(doc_id: str, content: str) -> str:
+    figures = media.load_figures(doc_id)
+    if not figures:
+        return content
+    try:
+        page_items = json.loads(content)
+    except ValueError:
+        return content
+    if not isinstance(page_items, list):
+        return content
+    by_page = {}
+    for figure in figures:
+        by_page.setdefault(figure["page"], []).append(
+            {"id": figure["id"], "kind": figure["kind"], "caption": figure["caption"]}
+        )
+    for item in page_items:
+        if isinstance(item, dict) and item.get("page") in by_page:
+            item["figures"] = by_page[item["page"]]
+    return json.dumps(page_items, ensure_ascii=False)
+
+
+def _pdf_entry(doc_id: str) -> dict:
+    entry = store.load_registry().get(doc_id)
+    if not entry or entry.get("type", "pdf") != "pdf" or not os.path.isfile(entry.get("pdf_path", "")):
+        raise ValueError(f"PDF document {doc_id} not found")
+    return entry
+
+
+@mcp.tool()
+def list_figures(doc_id: str, pages: str = "") -> str:
+    """List the figures (diagrams, plots, sketches, photos) extracted from a PDF.
+
+    Returns [{id, page, kind, caption}]. pages optionally restricts the
+    result, same format as get_page_content ('5-7', '3,8', '12'). Fetch a
+    figure with get_document_image(doc_id, id). An empty list can also mean
+    figure extraction has not run for this document yet.
+    """
+    _pdf_entry(doc_id)
+    figures = media.load_figures(doc_id)
+    if pages:
+        try:
+            wanted = set(_parse_pages(pages))
+        except (ValueError, AttributeError) as e:
+            return json.dumps({"error": f'Invalid pages format: {pages!r}. Use "5-7", "3,8", or "12". Error: {e}'})
+        figures = [f for f in figures if f["page"] in wanted]
+    return json.dumps(
+        [{"id": f["id"], "page": f["page"], "kind": f["kind"], "caption": f["caption"]} for f in figures],
+        ensure_ascii=False,
+    )
+
+
+@mcp.tool()
+def get_document_image(doc_id: str, image_id: str) -> Image:
+    """Get one extracted figure of a PDF as an image.
+
+    image_id comes from list_figures() or the "figures" of get_page_content(),
+    e.g. 'p12-1' (first figure on page 12).
+    """
+    _pdf_entry(doc_id)
+    data = media.figure_image(doc_id, image_id)
+    if data is None:
+        raise ValueError(f"Image {image_id} not found in {doc_id}")
+    return Image(data=data, format="jpeg")
+
+
+@mcp.tool()
+def get_page_image(doc_id: str, page: int) -> Image:
+    """Get a rendered image of one PDF page (1-indexed physical page number).
+
+    Use it when the layout matters or a figure was not extracted on its own.
+    """
+    entry = _pdf_entry(doc_id)
+    return Image(data=media.page_image(doc_id, entry["pdf_path"], page), format="jpeg")
 
 
 # ── Web UI / JSON API ────────────────────────────────────────────────────────
@@ -168,6 +248,9 @@ async def api_state(request):
             "error": e.get("error", ""),
             "uploaded_at": e.get("uploaded_at", ""),
             "indexed_at": e.get("indexed_at", ""),
+            "media_status": e.get("media_status", ""),
+            "media_error": e.get("media_error", ""),
+            "figure_count": e.get("figure_count"),
         }
         for doc_id, e in db["documents"].items()
     ]
@@ -231,6 +314,80 @@ async def api_document_file(request):
         filename=entry.get("doc_name") or None,
         content_disposition_type="inline",
     )
+
+
+async def api_extract_media(request):
+    doc_id = request.path_params["doc_id"]
+    entry = store.load_registry().get(doc_id)
+    if not entry:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    error = _media_blocker(entry)
+    if error:
+        return JSONResponse({"error": error}, status_code=409 if "already" in error else 400)
+    jobs.enqueue_media(doc_id)
+    return JSONResponse({"doc_id": doc_id, "media_status": "queued"})
+
+
+def _media_blocker(entry: dict) -> str:
+    if not media.enabled():
+        return "figure extraction is disabled (PAGEINDEX_FIGURE_MODEL=off)"
+    if entry.get("type", "pdf") != "pdf":
+        return "only PDFs have figures"
+    if not os.path.isfile(entry.get("pdf_path", "")):
+        return "PDF file is missing - delete and re-upload"
+    if entry.get("media_status") in ("queued", "processing"):
+        return "already queued or processing"
+    return ""
+
+
+async def api_backfill_media(request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    project = (body.get("project") or "").strip()
+    force = bool(body.get("force"))
+    queued = []
+    for doc_id, entry in store.load_registry().items():
+        if project and entry.get("project") != project:
+            continue
+        if entry.get("status") != "done" or _media_blocker(entry):
+            continue
+        if entry.get("media_status") == "done" and not force:
+            continue
+        jobs.enqueue_media(doc_id)
+        queued.append(doc_id)
+    return JSONResponse({"queued": queued})
+
+
+async def api_page_image(request):
+    doc_id = request.path_params["doc_id"]
+    try:
+        entry = _pdf_entry(doc_id)
+        data = media.page_image(doc_id, entry["pdf_path"], int(request.path_params["page"]))
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    return Response(data, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
+
+
+async def api_figures(request):
+    doc_id = request.path_params["doc_id"]
+    if doc_id not in store.load_registry():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"figures": [
+        {"id": f["id"], "page": f["page"], "kind": f["kind"], "caption": f["caption"]}
+        for f in media.load_figures(doc_id)
+    ]})
+
+
+async def api_figure_image(request):
+    doc_id = request.path_params["doc_id"]
+    if doc_id not in store.load_registry():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    data = media.figure_image(doc_id, request.path_params["figure_id"])
+    if data is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return Response(data, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
 
 
 async def api_rename_document(request):
@@ -306,6 +463,7 @@ async def api_delete_document(request):
     for path in (entry.get("pdf_path"), entry.get("tree_path"), entry.get("pages_path")):
         if path and os.path.isfile(path):
             os.remove(path)
+    media.delete(doc_id)
     return JSONResponse({"deleted": doc_id})
 
 
@@ -350,6 +508,11 @@ def build_app():
             Route("/api/upload", api_upload, methods=["POST"]),
             Route("/api/documents/{doc_id}/retry", api_retry_document, methods=["POST"]),
             Route("/api/documents/{doc_id}/file", api_document_file),
+            Route("/api/documents/{doc_id}/media", api_extract_media, methods=["POST"]),
+            Route("/api/documents/{doc_id}/pages/{page:int}/image", api_page_image),
+            Route("/api/documents/{doc_id}/figures", api_figures),
+            Route("/api/documents/{doc_id}/figures/{figure_id}/image", api_figure_image),
+            Route("/api/media/backfill", api_backfill_media, methods=["POST"]),
             Route("/api/documents/{doc_id}", api_rename_document, methods=["PATCH"]),
             Route("/api/documents/{doc_id}", api_delete_document, methods=["DELETE"]),
         ]

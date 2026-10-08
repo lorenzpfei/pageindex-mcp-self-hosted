@@ -110,6 +110,7 @@
     <header><h2 id="mTitle"></h2><span id="mBadge"></span></header>
     <dl id="mMeta"></dl>
     <button id="mOpen" class="primary"></button>
+    <button id="mFigures" hidden></button>
     <button id="mClose">Close</button>
     <p class="err" id="mErr" hidden></p>
     <p class="desc" id="mDesc"></p>
@@ -174,16 +175,28 @@ function openDetail(docId) {
   $("mTitle").textContent = d.doc_name;
   $("mBadge").innerHTML = badge(d);
   $("mDesc").textContent = d.doc_description || (d.type === "text" ? "" : "No description yet - it is generated during ingest.");
-  $("mErr").hidden = !d.error;  // failed docs, and rate-limit waits while queued
-  $("mErr").textContent = d.error || "";
+  const err = [d.error, d.media_error].filter(Boolean).join(" · ");
+  $("mErr").hidden = !err;
+  $("mErr").textContent = err;
   const rows = [
     [d.type === "text" ? "Total lines" : "Total pages", d.type === "text" ? d.line_count : d.page_count],
     ["Uploaded on", fmtDateLong(d.uploaded_at)],
   ];
   if (d.indexed_at) rows.push(["Indexed on", fmtDateLong(d.indexed_at)]);
+  if (d.type !== "text") rows.push(["Figures", figureLabel(d) || "not extracted"]);
   $("mMeta").innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${esc(String(v ?? "?"))}</dd>`).join("");
   $("mOpen").textContent = d.type === "text" ? "Open file" : "Open PDF";
   $("mOpen").onclick = () => openFile(d.doc_id);
+  const busy = d.media_status === "queued" || d.media_status === "processing";
+  $("mFigures").hidden = d.type === "text" || d.status !== "done";
+  $("mFigures").disabled = busy;
+  $("mFigures").textContent = d.media_status === "done" ? "Re-extract figures" : "Extract figures";
+  $("mFigures").onclick = async () => {
+    const r = await api("/api/documents/" + encodeURIComponent(d.doc_id) + "/media", { method: "POST" });
+    if (!r.ok) alert((await r.json()).error || "Figure extraction failed");
+    $("modal").hidden = true;
+    refresh();
+  };
   $("modal").hidden = false;
 }
 
@@ -199,6 +212,14 @@ async function openFile(docId) {
     if (w) w.close();
     alert("Could not load the file");
   }
+}
+
+function figureLabel(doc) {
+  if (doc.media_status === "queued") return "figures queued";
+  if (doc.media_status === "processing") return "extracting figures…";
+  if (doc.media_status === "failed") return "figure extraction failed";
+  if (doc.media_status === "done") return `${doc.figure_count ?? 0} figure${doc.figure_count === 1 ? "" : "s"}`;
+  return "";
 }
 
 function badge(doc) {
@@ -235,7 +256,7 @@ function render() {
       <div class="ico">${d.type === "text" ? "📝" : "📄"}</div>
       <div class="main">
         <div class="name" title="${esc(d.doc_name)}">${esc(d.doc_name)}</div>
-        <div class="meta">${size} · ${fmtDate(d.uploaded_at)}${d.indexed_at ? ` · indexed ${fmtDate(d.indexed_at)}` : ""}</div>
+        <div class="meta">${size} · ${fmtDate(d.uploaded_at)}${d.indexed_at ? ` · indexed ${fmtDate(d.indexed_at)}` : ""}${figureLabel(d) ? ` · ${figureLabel(d)}` : ""}</div>
       </div>
       ${badge(d)}
       <button class="icon" data-rendoc="${esc(d.doc_id)}" data-name="${esc(d.doc_name)}" title="Rename document">✎</button>

@@ -4,12 +4,15 @@ Layout under DATA_DIR:
   pdfs/<doc_id>.pdf       - original PDF
   files/<doc_id>.txt      - plain-text documents (stored as-is, no tree)
   trees/<doc_id>.json     - PageIndex tree structure (output of page_index_main)
+  media/<doc_id>/         - page images, figure crops and figures.json (see media.py)
   documents.json          - {"projects": [...], "documents": {doc_id: {...}}}
 
 Document entry fields: type ("pdf" | "text", missing means "pdf"), doc_name,
 doc_description, project, pdf_path (stored file path for all types), tree_path,
 page_count, line_count (text only), status ("queued" | "processing" | "done" |
-"failed"), error, uploaded_at, indexed_at (last successful ingest).
+"failed"), error, uploaded_at, indexed_at (last successful ingest), and for
+figure extraction media_status (same values), media_error, figure_count,
+media_at.
 """
 import json
 import os

@@ -16,9 +16,19 @@ How it works:
   during ingest; born-digital text pages are read losslessly for free. The
   transcriptions are cached so retrieval serves them too. Disable with
   `PAGEINDEX_OCR_MODEL=off`.
+- **Figures** (`app/media.py`): after the tree is built, every page is
+  rendered to a JPEG and a vision model (`PAGEINDEX_FIGURE_MODEL`, default
+  gemini/gemini-3.8-flash, one call per page) marks its figures - diagrams,
+  plots, sketches, photos - with a bounding box and a caption. Each figure is
+  cropped from the vector PDF at 200 DPI. Logos, icons and plain text are
+  skipped. Documents ingested before this existed get their figures via the
+  web UI ("Extract figures") or `POST /api/media/backfill`; their trees are
+  left untouched. Disable with `PAGEINDEX_FIGURE_MODEL=off`.
 - **Serve** (`app/server.py`): exposes `list_documents`, `get_document`,
-  `get_document_structure`, `get_page_content` as MCP tools over streamable
-  HTTP, protected by a bearer token. The connecting agent (e.g. Claude) does
+  `get_document_structure`, `get_page_content`, `list_figures`,
+  `get_document_image` and `get_page_image` as MCP tools over streamable
+  HTTP, protected by a bearer token. `get_page_content` lists the figures of
+  each returned page (id, kind, caption). The connecting agent (e.g. Claude) does
   the navigation/reasoning itself - serving is free after ingest.
 - **Text files**: anything that isn't a PDF (code, Jupyter notebooks,
   markdown, any UTF-8 file up to 10 MB) is stored as plain text without LLM
@@ -67,6 +77,19 @@ How it works:
 
    Trees are saved to `<data>/trees/<doc_id>.json` and registered in
    `<data>/documents.json`.
+
+## Figure API
+
+All endpoints need the bearer token.
+
+- `GET /api/documents/<doc_id>/figures` - `{"figures": [{id, page, kind, caption}]}`
+- `GET /api/documents/<doc_id>/figures/<id>/image` - figure crop (JPEG), e.g. id `p12-1`
+- `GET /api/documents/<doc_id>/pages/<n>/image` - rendered page (JPEG, rendered on first request)
+- `POST /api/documents/<doc_id>/media` - (re-)extract the figures of one document
+- `POST /api/media/backfill` - extract figures for every finished PDF that has none yet;
+  body `{"project": "Deep Learning"}` restricts it to a folder, `{"force": true}` redoes all
+
+Files live under `<data>/media/<doc_id>/`.
 
 ## Connecting an MCP client
 
