@@ -434,13 +434,18 @@ def add_preface_if_needed(data):
 
 
 
+def strip_surrogates(text):
+    # PyPDF2 decodes some glyphs to lone surrogates, which cannot be UTF-8 encoded into LLM requests.
+    return (text or "").encode("utf-8", "ignore").decode("utf-8")
+
+
 def get_page_tokens(pdf_path, model=None, pdf_parser="PyPDF2"):
     if pdf_parser == "PyPDF2":
         pdf_reader = PyPDF2.PdfReader(pdf_path)
         page_list = []
         for page_num in range(len(pdf_reader.pages)):
             page = pdf_reader.pages[page_num]
-            page_text = page.extract_text()
+            page_text = strip_surrogates(page.extract_text())
             token_length = litellm.token_counter(model=model, text=page_text)
             page_list.append((page_text, token_length))
         return page_list
@@ -452,7 +457,7 @@ def get_page_tokens(pdf_path, model=None, pdf_parser="PyPDF2"):
             doc = pymupdf.open(pdf_path)
         page_list = []
         for page in doc:
-            page_text = page.get_text()
+            page_text = strip_surrogates(page.get_text())
             token_length = litellm.token_counter(model=model, text=page_text)
             page_list.append((page_text, token_length))
         return page_list
