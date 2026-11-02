@@ -12,6 +12,8 @@ lives under /api/. Everything except / and /health requires the bearer token.
 Note: no `from __future__ import annotations` here - it turns annotations into
 strings, which breaks FastMCP's tool signature inspection in mcp 1.9.x.
 """
+import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -37,6 +39,8 @@ import store  # noqa: E402
 import textfiles  # noqa: E402
 
 API_KEY = os.environ.get("PAGEINDEX_MCP_API_KEY")
+# Derived so read-only clients need no extra secret in the deployment.
+READ_API_KEY = hmac.new(API_KEY.encode(), b"pageindex-read-only", hashlib.sha256).hexdigest() if API_KEY else None
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
@@ -470,6 +474,12 @@ async def api_delete_document(request):
 
 # ── App assembly ─────────────────────────────────────────────────────────────
 
+def _read_only_allowed(scope, auth: str) -> bool:
+    if not secrets.compare_digest(auth, f"Bearer {READ_API_KEY}"):
+        return False
+    return scope.get("method") == "GET" or scope["path"].startswith("/mcp")
+
+
 class BearerAuthMiddleware:
     """Pure ASGI middleware: BaseHTTPMiddleware buffers streamed responses,
     which can break the MCP streamable-HTTP transport."""
@@ -484,7 +494,7 @@ class BearerAuthMiddleware:
                 if name == b"authorization":
                     auth = value.decode("latin-1")
                     break
-            if not secrets.compare_digest(auth, f"Bearer {API_KEY}"):
+            if not secrets.compare_digest(auth, f"Bearer {API_KEY}") and not _read_only_allowed(scope, auth):
                 response = JSONResponse({"error": "unauthorized"}, status_code=401)
                 await response(scope, receive, send)
                 return

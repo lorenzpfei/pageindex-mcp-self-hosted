@@ -48,7 +48,9 @@ How it works:
 
 1. Copy `.env.example` to `.env` and fill in:
    - `GEMINI_API_KEY` - used only during ingest (tree building + OCR)
-   - `PAGEINDEX_MCP_API_KEY` - bearer token clients must send, e.g. `openssl rand -hex 32`
+   - `PAGEINDEX_MCP_API_KEY` - bearer token clients must send, e.g. `openssl rand -hex 32`.
+     Read-only clients (MCP tools and GET endpoints only, no upload or delete) can use the derived key
+     `python3 -c 'import hashlib,hmac,sys; print(hmac.new(sys.argv[1].encode(), b"pageindex-read-only", hashlib.sha256).hexdigest())' <PAGEINDEX_MCP_API_KEY>`
    - optional: `PAGEINDEX_MODEL` (any LiteLLM model id for tree-building;
      default gemini/gemini-3.5-flash), `PAGEINDEX_OCR_MODEL` (vision model
      for text-poor pages, "off" to disable), `PAGEINDEX_INGEST_WORKERS`
