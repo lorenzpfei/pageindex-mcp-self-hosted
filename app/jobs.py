@@ -22,6 +22,7 @@ from pageindex.utils import PROVIDER_BUSY_ERRORS, ConfigLoader, get_page_tokens,
 
 import media  # noqa: E402
 import ocr  # noqa: E402
+import search  # noqa: E402
 import store  # noqa: E402
 
 WORKERS = max(1, int(os.environ.get("PAGEINDEX_INGEST_WORKERS", "2")))
@@ -168,6 +169,10 @@ def build_tree(doc_id: str) -> None:
             indexed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         )
         print(f"Ingest done: {doc_id}")
+        try:
+            search.build(doc_id)
+        except Exception as e:
+            print(f"Search cache failed for {doc_id}: {e}")
         _reset_rate_limit_strikes()
         if media.enabled():
             enqueue_media(doc_id)

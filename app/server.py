@@ -35,6 +35,7 @@ from pageindex.utils import get_number_of_pages  # noqa: E402
 
 import jobs  # noqa: E402
 import media  # noqa: E402
+import search  # noqa: E402
 import store  # noqa: E402
 import textfiles  # noqa: E402
 
@@ -97,6 +98,18 @@ def list_documents() -> str:
             item["page_count"] = entry.get("page_count")
         items.append(item)
     return json.dumps(items, ensure_ascii=False)
+
+
+@mcp.tool()
+def search_pages(query: str, project: str = "", limit: int = 10) -> str:
+    """Full-text search over the pages of all documents (BM25 over page text and section titles).
+
+    Returns the best pages as [{doc_id, doc_name, project, page, section, snippet, score}].
+    Use keywords in the document's language; slides are often English, regulations German,
+    so search both when unsure. Words of four or more letters also match longer words
+    starting with them. project optionally restricts the search to one folder.
+    """
+    return json.dumps(search.search(query, project, max(1, min(limit, 25))), ensure_ascii=False)
 
 
 @mcp.tool()
@@ -469,6 +482,7 @@ async def api_delete_document(request):
         if path and os.path.isfile(path):
             os.remove(path)
     media.delete(doc_id)
+    search.remove(doc_id)
     return JSONResponse({"deleted": doc_id})
 
 
@@ -524,6 +538,7 @@ def build_app():
         ]
     )
     jobs.start()
+    search.start()
     return BearerAuthMiddleware(app)
 
 

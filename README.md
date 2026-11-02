@@ -28,8 +28,10 @@ How it works:
   `get_document_structure`, `get_page_content`, `list_figures`,
   `get_document_image` and `get_page_image` as MCP tools over streamable
   HTTP, protected by a bearer token. `get_page_content` lists the figures of
-  each returned page (id, kind, caption). The connecting agent (e.g. Claude) does
-  the navigation/reasoning itself - serving is free after ingest.
+  each returned page (id, kind, caption). `search_pages` ranks the pages of all
+  documents by keyword (BM25 over page text and section titles, from a cache
+  `trees/<doc_id>.search.json` written after ingest). The connecting agent
+  (e.g. Claude) does the navigation/reasoning itself - serving is free after ingest.
 - **Text files**: anything that isn't a PDF (code, Jupyter notebooks,
   markdown, any UTF-8 file up to 10 MB) is stored as plain text without LLM
   ingest - instantly available, zero cost. The same MCP tools serve them,
