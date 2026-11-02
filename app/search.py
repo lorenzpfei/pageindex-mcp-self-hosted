@@ -123,8 +123,8 @@ def _load(doc_id: str) -> dict | None:
 def _snippet(text: str, terms: list[str], width: int = 220) -> str:
     flat = " ".join(text.split())
     lower = flat.casefold()
-    hits = [i for i in (lower.find(t) for t in terms) if i >= 0]
-    start = max(0, min(hits) - width // 3) if hits else 0
+    hit = next((i for i in (lower.find(t) for t in terms) if i >= 0), -1)
+    start = max(0, hit - width // 3) if hit >= 0 else 0
     piece = flat[start:start + width]
     return ("…" if start > 0 else "") + piece + ("…" if start + width < len(flat) else "")
 
@@ -174,6 +174,7 @@ def search(query: str, project: str = "", limit: int = 10) -> list[dict]:
         if score > 0:
             scored.append((score, doc_id, page))
     scored.sort(key=lambda item: item[0], reverse=True)
+    rare_first = sorted(terms, key=lambda term: frequencies[term])
     return [
         {
             "doc_id": doc_id,
@@ -181,7 +182,7 @@ def search(query: str, project: str = "", limit: int = 10) -> list[dict]:
             "project": registry[doc_id].get("project", ""),
             "page": page["page"],
             "section": page["heading"],
-            "snippet": _snippet(page["text"], terms),
+            "snippet": _snippet(page["text"], rare_first),
             "score": round(score, 2),
         }
         for score, doc_id, page in scored[:limit]
