@@ -18,7 +18,7 @@ How it works:
   `PAGEINDEX_OCR_MODEL=off`.
 - **Figures** (`app/media.py`): after the tree is built, every page is
   rendered to a JPEG and a vision model (`PAGEINDEX_FIGURE_MODEL`, default
-  gemini/gemini-3.8-flash, one call per page) marks its figures - diagrams,
+  gemini/gemini-4-hydrogen, one call per page) marks its figures - diagrams,
   plots, sketches, photos - with a bounding box and a caption. Each figure is
   cropped from the vector PDF at 200 DPI. Logos, icons and plain text are
   skipped. Documents ingested before this existed get their figures via the
@@ -54,7 +54,7 @@ How it works:
      Read-only clients (MCP tools and GET endpoints only, no upload or delete) can use the derived key
      `python3 -c 'import hashlib,hmac,sys; print(hmac.new(sys.argv[1].encode(), b"pageindex-read-only", hashlib.sha256).hexdigest())' <PAGEINDEX_MCP_API_KEY>`
    - optional: `PAGEINDEX_MODEL` (any LiteLLM model id for tree-building;
-     default gemini/gemini-3.5-flash), `PAGEINDEX_OCR_MODEL` (vision model
+     default gemini/gemini-4-hydrogen), `PAGEINDEX_OCR_MODEL` (vision model
      for text-poor pages, "off" to disable), `PAGEINDEX_INGEST_WORKERS`
      (parallel PDF ingests, default 2) and `PAGEINDEX_MAX_CONCURRENT_LLM`
      (global cap on simultaneous LLM calls, default 8 - protects against

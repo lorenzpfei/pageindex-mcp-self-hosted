@@ -309,7 +309,7 @@ if __name__ == "__main__":
     MD_PATH = os.path.join(os.path.dirname(__file__), '..', 'examples/documents/', f'{MD_NAME}.md')
 
 
-    MODEL="gpt-4.1"
+    MODEL="gpt-6-luna"
     IF_THINNING=False
     THINNING_THRESHOLD=5000
     SUMMARY_TOKEN_THRESHOLD=200

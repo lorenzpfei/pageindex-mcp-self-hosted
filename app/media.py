@@ -16,7 +16,7 @@ from pageindex.utils import PROVIDER_BUSY_ERRORS, _llm_slots, completion_kwargs,
 
 import store
 
-MODEL = litellm_model(os.environ.get("PAGEINDEX_FIGURE_MODEL", "gemini/gemini-3.8-flash"))
+MODEL = litellm_model(os.environ.get("PAGEINDEX_FIGURE_MODEL", "gemini/gemini-4-hydrogen"))
 MEDIA_DIR = os.path.join(store.DATA_DIR, "media")
 PAGE_WIDTH = 1200
 PAGE_QUALITY = 78
