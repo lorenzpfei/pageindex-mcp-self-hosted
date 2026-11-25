@@ -13,13 +13,16 @@ lives under /api/. Everything except / and /health requires the bearer token.
 Note: no `from __future__ import annotations` here - it turns annotations into
 strings, which breaks FastMCP's tool signature inspection in mcp 1.9.x.
 """
+import asyncio
 import base64
 import contextvars
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import secrets
+import socket
 import sys
 import urllib.parse
 
@@ -55,13 +58,12 @@ STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 # its API calls are all authenticated.
 PUBLIC_PATHS = {"/", "/health", "/favicon.ico"}
 
-# Largest body upload_document() will pull from a URL - the container runs
-# with a hard memory cap and the download is buffered.
-MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024
-
 # Set per request by BearerAuthMiddleware. The derived read-only key reaches
 # /mcp (all read tools), so the write tools check this instead of the path.
 _write_allowed = contextvars.ContextVar("pageindex_write_allowed", default=False)
+
+MAX_REDIRECTS = 5
+DOWNLOAD_TIMEOUT = 60.0
 
 # stateless + JSON responses: no in-memory sessions (survives redeploys without
 # breaking connected clients) and no SSE streams to upset reverse proxies.
@@ -133,6 +135,21 @@ def get_document(doc_id: str) -> str:
     if error:
         return error
     return _get_document(documents={doc_id: doc_info}, doc_id=doc_id)
+
+
+@mcp.tool()
+def get_document_status(doc_id: str) -> str:
+    """Check how far a document is: status ("queued", "processing", "done",
+    "failed"), media_status for figure extraction, and the error text of
+    whichever failed.
+
+    While a worker is on it, "progress" carries phase ("reading", "ocr",
+    "tree" during ingest, "figures" during figure extraction), done/total
+    where the phase counts pages, and elapsed seconds. Poll this after
+    upload_document() until status reads "done".
+    """
+    payload, _ = documents.status(doc_id)
+    return json.dumps(payload, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -260,16 +277,59 @@ def _require_write() -> None:
         raise ValueError("This tool needs the full API key; the read-only key may only read.")
 
 
-async def _download(url: str) -> bytes:
-    async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
-        async with client.stream("GET", url) as response:
-            response.raise_for_status()
-            data = bytearray()
-            async for chunk in response.aiter_bytes():
-                data.extend(chunk)
-                if len(data) > MAX_DOWNLOAD_BYTES:
-                    raise ValueError(f"download exceeds {MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB")
-    return bytes(data)
+def _is_internal(ip) -> bool:
+    """True for everything that is not a globally routable unicast address:
+    loopback, private ranges, link-local (which covers the 169.254.169.254
+    metadata endpoint), unique-local IPv6, multicast and reserved space.
+    IPv4-mapped IPv6 is unwrapped first so ::ffff:127.0.0.1 cannot slip past."""
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped:
+        ip = mapped
+    return ip.is_multicast or not ip.is_global
+
+
+async def _check_url(url: str) -> None:
+    """Refuse anything but http(s) to a public address. Raises ValueError."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"only http and https URLs can be fetched, not {parsed.scheme or 'a relative URL'!r}")
+    if not parsed.hostname:
+        raise ValueError("URL has no host")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        raise ValueError(f"cannot resolve {parsed.hostname}: {e}")
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        if _is_internal(ip):
+            raise ValueError(f"{parsed.hostname} resolves to {ip}, which is not a public address")
+
+
+async def _download(url: str) -> tuple[str, bytes]:
+    """Fetch a URL and return (final url, body).
+
+    Redirects are followed by hand because every hop has to pass _check_url -
+    httpx's own follow_redirects would only validate the first one.
+    """
+    async with httpx.AsyncClient(follow_redirects=False, timeout=DOWNLOAD_TIMEOUT) as client:
+        for _ in range(MAX_REDIRECTS + 1):
+            await _check_url(url)
+            async with client.stream("GET", url) as response:
+                if response.is_redirect:
+                    location = response.headers.get("location")
+                    if not location:
+                        raise ValueError("redirect without a location header")
+                    url = urllib.parse.urljoin(url, location)
+                    continue
+                response.raise_for_status()
+                data = bytearray()
+                async for chunk in response.aiter_bytes():
+                    data.extend(chunk)
+                    if len(data) > documents.MAX_UPLOAD_BYTES:
+                        raise ValueError(f"download exceeds {documents.MAX_UPLOAD_BYTES // (1024 * 1024)} MB")
+                return url, bytes(data)
+    raise ValueError(f"more than {MAX_REDIRECTS} redirects")
 
 
 @mcp.tool()
@@ -278,20 +338,24 @@ async def upload_document(url: str = "", content_base64: str = "", filename: str
 
     Pass exactly one of url (filename defaults to the last URL path segment)
     or content_base64 together with filename. project is the folder to file it
-    under and is created if it does not exist yet.
+    under and is created if it does not exist yet. Only public http(s) URLs
+    can be fetched, and no more than 100 MB.
+
+    Re-uploading identical bytes into the same folder returns the document
+    already there, flagged "duplicate": true, instead of a second copy.
 
     PDFs are queued for LLM tree-building and come back as status "processing";
-    poll list_documents() until the document reads "done". Everything else is
-    stored as plain text (UTF-8, max 10 MB) and is readable immediately.
+    follow them with get_document_status(doc_id). Everything else is stored as
+    plain text (UTF-8, max 10 MB) and is readable immediately.
 
-    Needs the full API key - the read-only key cannot upload.
+    Needs the full API key.
     """
     _require_write()
     if bool(url) == bool(content_base64):
         return json.dumps({"error": "pass either url or content_base64"})
     if url:
         try:
-            data = await _download(url)
+            url, data = await _download(url)
         except Exception as e:
             return json.dumps({"error": f"download failed: {e}"})
         filename = filename or os.path.basename(urllib.parse.urlparse(url).path) or "download"
@@ -307,14 +371,19 @@ async def upload_document(url: str = "", content_base64: str = "", filename: str
 
 
 @mcp.tool()
-def create_project(name: str) -> str:
-    """Create a folder (project) that documents can be filed under.
-
-    Needs the full API key.
-    """
+def retry_document(doc_id: str) -> str:
+    """Queue a failed PDF for ingest again. Needs the full API key."""
     _require_write()
-    error = documents.create_project(name.strip())
-    return json.dumps({"error": error} if error else {"project": name.strip()}, ensure_ascii=False)
+    payload, _ = documents.retry(doc_id)
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@mcp.tool()
+def rename_document(doc_id: str, name: str) -> str:
+    """Give a document a new display name. Needs the full API key."""
+    _require_write()
+    payload, _ = documents.rename(doc_id, name.strip())
+    return json.dumps(payload, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -324,10 +393,41 @@ def move_document(doc_id: str, project: str = "") -> str:
     The folder is created if it does not exist yet. Needs the full API key.
     """
     _require_write()
-    project = project.strip()
-    if not documents.move(doc_id, project):
-        return json.dumps({"error": f"Document {doc_id} not found"})
-    return json.dumps({"doc_id": doc_id, "project": project}, ensure_ascii=False)
+    payload, _ = documents.move(doc_id, project.strip())
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@mcp.tool()
+def extract_figures(doc_id: str) -> str:
+    """Queue figure extraction for a PDF: one vision-model call per page, so
+    this costs LLM usage. Follow it with get_document_status(doc_id).
+
+    Needs the full API key.
+    """
+    _require_write()
+    payload, _ = documents.extract_figures(doc_id)
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@mcp.tool()
+def create_project(name: str) -> str:
+    """Create a folder (project) that documents can be filed under.
+
+    Needs the full API key.
+    """
+    _require_write()
+    payload, _ = documents.create_project(name.strip())
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@mcp.tool()
+def rename_project(name: str, new_name: str) -> str:
+    """Rename a folder and move every document in it along. Fails if the target
+    name is already taken. Needs the full API key.
+    """
+    _require_write()
+    payload, _ = documents.rename_project(name, new_name.strip())
+    return json.dumps(payload, ensure_ascii=False)
 
 
 @mcp.tool()
@@ -337,9 +437,19 @@ def delete_document(doc_id: str) -> str:
     This cannot be undone. Needs the full API key.
     """
     _require_write()
-    if not documents.delete(doc_id):
-        return json.dumps({"error": f"Document {doc_id} not found"})
-    return json.dumps({"deleted": doc_id})
+    payload, _ = documents.delete(doc_id)
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@mcp.tool()
+def delete_project(name: str) -> str:
+    """Delete an empty folder; folders that still hold documents are refused.
+
+    Needs the full API key.
+    """
+    _require_write()
+    payload, _ = documents.delete_project(name)
+    return json.dumps(payload, ensure_ascii=False)
 
 
 # ── Web UI / JSON API ────────────────────────────────────────────────────────
@@ -382,11 +492,8 @@ async def api_create_project(request):
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "invalid JSON"}, status_code=400)
-    name = (body.get("name") or "").strip()
-    error = documents.create_project(name)
-    if error:
-        return JSONResponse({"error": error}, status_code=400)
-    return JSONResponse({"name": name}, status_code=201)
+    payload, status = documents.create_project((body.get("name") or "").strip())
+    return JSONResponse(payload, status_code=status)
 
 
 async def api_rename_project(request):
@@ -395,28 +502,13 @@ async def api_rename_project(request):
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "invalid JSON"}, status_code=400)
-    new = (body.get("name") or "").strip()
-    if not new or len(new) > 100:
-        return JSONResponse({"error": "invalid project name"}, status_code=400)
-    if new != old and not store.rename_project(old, new):
-        return JSONResponse({"error": "project not found or target name already exists"}, status_code=400)
-    return JSONResponse({"name": new})
+    payload, status = documents.rename_project(old, (body.get("name") or "").strip())
+    return JSONResponse(payload, status_code=status)
 
 
 async def api_retry_document(request):
-    doc_id = request.path_params["doc_id"]
-    entry = store.load_registry().get(doc_id)
-    if not entry:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    if entry.get("type", "pdf") == "text":
-        return JSONResponse({"error": "text documents are not ingested"}, status_code=400)
-    if entry.get("status") in ("queued", "processing"):
-        return JSONResponse({"error": "already queued or processing"}, status_code=409)
-    if not os.path.isfile(entry.get("pdf_path", "")):
-        return JSONResponse({"error": "PDF file is missing - delete and re-upload"}, status_code=400)
-    store.update_document(doc_id, status="queued", error="")
-    jobs.enqueue(doc_id)
-    return JSONResponse({"doc_id": doc_id, "status": "queued"})
+    payload, status = documents.retry(request.path_params["doc_id"])
+    return JSONResponse(payload, status_code=status)
 
 
 async def api_document_file(request):
@@ -437,27 +529,8 @@ async def api_document_file(request):
 
 
 async def api_extract_media(request):
-    doc_id = request.path_params["doc_id"]
-    entry = store.load_registry().get(doc_id)
-    if not entry:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    error = _media_blocker(entry)
-    if error:
-        return JSONResponse({"error": error}, status_code=409 if "already" in error else 400)
-    jobs.enqueue_media(doc_id)
-    return JSONResponse({"doc_id": doc_id, "media_status": "queued"})
-
-
-def _media_blocker(entry: dict) -> str:
-    if not media.enabled():
-        return "figure extraction is disabled (PAGEINDEX_FIGURE_MODEL=off)"
-    if entry.get("type", "pdf") != "pdf":
-        return "only PDFs have figures"
-    if not os.path.isfile(entry.get("pdf_path", "")):
-        return "PDF file is missing - delete and re-upload"
-    if entry.get("media_status") in ("queued", "processing"):
-        return "already queued or processing"
-    return ""
+    payload, status = documents.extract_figures(request.path_params["doc_id"])
+    return JSONResponse(payload, status_code=status)
 
 
 async def api_backfill_media(request):
@@ -471,7 +544,7 @@ async def api_backfill_media(request):
     for doc_id, entry in store.load_registry().items():
         if project and entry.get("project") != project:
             continue
-        if entry.get("status") != "done" or _media_blocker(entry):
+        if entry.get("status") != "done" or documents.media_blocker(entry):
             continue
         if entry.get("media_status") == "done" and not force:
             continue
@@ -516,19 +589,13 @@ async def api_rename_document(request):
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "invalid JSON"}, status_code=400)
-    name = (body.get("name") or "").strip()
-    if not name or len(name) > 200:
-        return JSONResponse({"error": "invalid document name"}, status_code=400)
-    if not store.update_document(doc_id, doc_name=name):
-        return JSONResponse({"error": "not found"}, status_code=404)
-    return JSONResponse({"doc_id": doc_id, "doc_name": name})
+    payload, status = documents.rename(doc_id, (body.get("name") or "").strip())
+    return JSONResponse(payload, status_code=status)
 
 
 async def api_delete_project(request):
-    name = request.path_params["name"]
-    if not store.remove_project(name):
-        return JSONResponse({"error": "project not found or not empty"}, status_code=400)
-    return JSONResponse({"deleted": name})
+    payload, status = documents.delete_project(request.path_params["name"])
+    return JSONResponse(payload, status_code=status)
 
 
 async def api_upload(request):
@@ -537,15 +604,17 @@ async def api_upload(request):
     project = (form.get("project") or "").strip()
     if upload is None or not getattr(upload, "filename", None):
         return JSONResponse({"error": "missing file"}, status_code=400)
-    payload, status = documents.save_upload(upload.filename, await upload.read(), project)
+    # Bounded read: save_upload refuses anything over the limit, and the
+    # extra byte is what makes an oversized body detectable without holding
+    # all of it in memory.
+    data = await upload.read(documents.MAX_UPLOAD_BYTES + 1)
+    payload, status = documents.save_upload(upload.filename, data, project)
     return JSONResponse(payload, status_code=status)
 
 
 async def api_delete_document(request):
-    doc_id = request.path_params["doc_id"]
-    if not documents.delete(doc_id):
-        return JSONResponse({"error": "not found"}, status_code=404)
-    return JSONResponse({"deleted": doc_id})
+    payload, status = documents.delete(request.path_params["doc_id"])
+    return JSONResponse(payload, status_code=status)
 
 
 # ── App assembly ─────────────────────────────────────────────────────────────

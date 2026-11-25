@@ -9,10 +9,11 @@ Layout under DATA_DIR:
 
 Document entry fields: type ("pdf" | "text", missing means "pdf"), doc_name,
 doc_description, project, pdf_path (stored file path for all types), tree_path,
-page_count, line_count (text only), status ("queued" | "processing" | "done" |
-"failed"), error, uploaded_at, indexed_at (last successful ingest), and for
-figure extraction media_status (same values), media_error, figure_count,
-media_at.
+page_count, line_count (text only), sha256 (of the uploaded bytes, missing on
+documents stored before deduplication existed), status ("queued" |
+"processing" | "done" | "failed"), error, uploaded_at, indexed_at (last
+successful ingest), and for figure extraction media_status (same values),
+media_error, figure_count, media_at.
 """
 import json
 import os
@@ -122,6 +123,7 @@ def create_document(
     doc_type: str = "pdf",
     line_count: int | None = None,
     status: str = "queued",
+    sha256: str = "",
 ) -> dict:
     entry = {
         "type": doc_type,
@@ -132,6 +134,7 @@ def create_document(
         "tree_path": "",
         "page_count": page_count,
         "line_count": line_count,
+        "sha256": sha256,
         "status": status,
         "error": "",
         "uploaded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),

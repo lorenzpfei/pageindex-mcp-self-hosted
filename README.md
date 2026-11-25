@@ -27,13 +27,16 @@ How it works:
 - **Serve** (`app/server.py`): exposes `list_documents`, `get_document`,
   `get_document_structure`, `get_page_content`, `list_figures`,
   `get_document_image` and `get_page_image` as MCP tools over streamable
-  HTTP, protected by a bearer token. Writing clients additionally get
-  `upload_document`, `create_project`, `move_document` and `delete_document`
-  (see below). `get_page_content` lists the figures of
+  HTTP, protected by a bearer token. `get_document_status` follows a
+  document through ingest. Clients holding the full key additionally get the
+  write tools (see below). `get_page_content` lists the figures of
   each returned page (id, kind, caption). `search_pages` ranks the pages of all
   documents by keyword (BM25 over page text and section titles, from a cache
   `trees/<doc_id>.search.json` written after ingest). The connecting agent
   (e.g. Claude) does the navigation/reasoning itself - serving is free after ingest.
+- **Limits**: no upload or download may exceed 100 MB, and re-uploading
+  identical bytes into the same folder returns the document already there
+  (SHA-256 over the content) instead of a second copy.
 - **Text files**: anything that isn't a PDF (code, Jupyter notebooks,
   markdown, any UTF-8 file up to 10 MB) is stored as plain text without LLM
   ingest - instantly available, zero cost. The same MCP tools serve them,
@@ -86,25 +89,48 @@ How it works:
 
 ## MCP write tools
 
-Clients holding the full `PAGEINDEX_MCP_API_KEY` can also manage documents
-without the web UI. The derived read-only key is rejected by these four and
-keeps working for everything else.
+Clients holding the full `PAGEINDEX_MCP_API_KEY` can manage documents without
+the web UI. The derived read-only key is rejected by all of them and keeps
+working for everything else, `get_document_status` included.
 
 - `upload_document(url, content_base64, filename, project)` - add a document,
   either from a URL the server downloads (`filename` defaults to the last URL
   path segment) or from base64 content plus `filename`. `project` is the
   folder; it is created when missing. PDFs come back as `"processing"` and are
-  queued for tree-building - poll `list_documents()` until they read `"done"`.
-  Anything else is stored as plain text and is readable immediately.
-- `create_project(name)` - create a folder.
-- `move_document(doc_id, project)` - move a document to another folder; an
-  empty `project` moves it to the top level.
+  queued for tree-building - follow them with `get_document_status`. Anything
+  else is stored as plain text and is readable immediately. Identical bytes in
+  the same folder return the existing document with `"duplicate": true`.
+- `retry_document(doc_id)` - queue a failed PDF for ingest again.
+- `rename_document(doc_id, name)` - change a document's display name.
+- `move_document(doc_id, project)` - move it to another folder; an empty
+  `project` moves it to the top level.
+- `extract_figures(doc_id)` - queue figure extraction (one vision-model call
+  per page, so it costs LLM usage).
+- `create_project(name)` / `rename_project(name, new_name)` - manage folders.
 - `delete_document(doc_id)` - delete a document plus its tree, figures and
   search cache. Not undoable.
+- `delete_project(name)` - delete an empty folder.
 
-They share `app/documents.py` with `POST /api/upload`, `POST /api/projects`
-and `DELETE /api/documents/<doc_id>`, so the UI and MCP clients take the same
-storage and ingest path.
+They share `app/documents.py` with the JSON API, so the UI and MCP clients
+take the same storage, ingest and cleanup path.
+
+### Fetching URLs safely
+
+`upload_document(url=...)` makes the server issue a request of the caller's
+choosing, so the URL is checked before each attempt:
+
+- only `http` and `https`,
+- the host is resolved first and **every** returned address must be a public
+  unicast address - loopback, private ranges, link-local (which covers the
+  `169.254.169.254` metadata endpoint), unique-local IPv6, multicast and
+  reserved space are refused, with IPv4-mapped IPv6 unwrapped first,
+- redirects are followed by hand, at most five, and each hop is checked again,
+- the body is streamed and aborted past 100 MB; the request times out after
+  60 s.
+
+Residual risk: the address is validated before the request, not pinned for
+it, so a DNS entry that changes between the check and the connection (DNS
+rebinding) is not covered.
 
 ## Figure API
 
@@ -184,8 +210,10 @@ python -m pytest tests
 ```
 
 They run the real ASGI app in-process and cover the write path: that the
-read-only key cannot upload, move or delete, and that uploads land in the
-registry the same way through the MCP tool and the multipart route.
+read-only key reaches no write tool and no writing REST endpoint, that the
+tools do what they say (upload, rename, move, retry, folders, delete),
+deduplication and the size cap, and that the URL fetch refuses non-public
+targets and redirects into them.
 
 ## Persistence
 
