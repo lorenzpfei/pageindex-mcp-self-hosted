@@ -37,6 +37,15 @@ How it works:
 - **Limits**: no upload or download may exceed 100 MB, and re-uploading
   identical bytes into the same folder returns the document already there
   (SHA-256 over the content) instead of a second copy.
+- **Cost limits**: every ingest or figure-extraction run is an attempt, and
+  a document gets at most 3 of each - container restarts count, so a PDF
+  that crashes the container cannot loop. Each attempt is capped at 25 LLM
+  calls per page (at least 200) and 3 hours; every request times out after
+  10 minutes, and requests no retry can fix (bad key, rejected or oversized
+  prompt) are not retried. A document that runs out ends up `failed` with
+  the reason, until it is retried on purpose (web UI, `retry_document`,
+  `extract_figures`), which grants a fresh budget. `get_document_status`
+  shows the attempts used.
 - **Text files**: anything that isn't a PDF (code, Jupyter notebooks,
   markdown, any UTF-8 file up to 10 MB) is stored as plain text without LLM
   ingest - instantly available, zero cost. The same MCP tools serve them,
@@ -65,7 +74,7 @@ How it works:
      (global cap on simultaneous LLM calls, default 8 - protects against
      provider rate limits; if an ingest still hits a rate limit or the
      model is overloaded, it is re-queued automatically with a growing
-     cooldown)
+     cooldown, up to 3 attempts in total)
 
 2. Build and start:
 

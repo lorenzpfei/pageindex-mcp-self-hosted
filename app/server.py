@@ -548,6 +548,7 @@ async def api_backfill_media(request):
             continue
         if entry.get("media_status") == "done" and not force:
             continue
+        store.update_document(doc_id, media_attempts=0)
         jobs.enqueue_media(doc_id)
         queued.append(doc_id)
     return JSONResponse({"queued": queued})

@@ -1,4 +1,5 @@
 import litellm
+import contextvars
 import logging
 import os
 import textwrap
@@ -36,12 +37,17 @@ def litellm_model(model):
     return model
 
 
+# Without it a stalled request holds a worker for LiteLLM's default of well
+# over an hour, and the per-job time limit below is only checked between calls.
+LLM_CALL_TIMEOUT = 600
+
+
 def completion_kwargs(model):
     """Gemini 3 models degrade with temperature < 1.0 (LiteLLM warns about
     infinite loops / failures); keep the deterministic 0 only elsewhere."""
     if model and model.removeprefix("litellm/").startswith("gemini"):
-        return {}
-    return {"temperature": 0}
+        return {"timeout": LLM_CALL_TIMEOUT}
+    return {"temperature": 0, "timeout": LLM_CALL_TIMEOUT}
 
 
 def retry_sleep(attempt):
@@ -65,6 +71,58 @@ _llm_slots = threading.BoundedSemaphore(MAX_CONCURRENT_LLM)
 # abort the ingest and let jobs.py re-queue the document with a cooldown.
 PROVIDER_BUSY_ERRORS = (litellm.RateLimitError, litellm.ServiceUnavailableError)
 
+# Errors no retry can fix: bad key, rejected or oversized request, unknown
+# model. Retrying them only resends the full prompt for nothing.
+NON_RETRYABLE_ERRORS = (
+    litellm.AuthenticationError,
+    litellm.BadRequestError,
+    litellm.NotFoundError,
+    litellm.PermissionDeniedError,
+)
+
+
+class LLMBudgetExceeded(Exception):
+    """The running job used up its LLM call budget or its time limit."""
+
+
+class LLMBudget:
+    """Hard cap on the LLM calls of one ingest or figure-extraction attempt.
+
+    Every request counts, retries included, because every request can be
+    billed. Once exhausted it stays exhausted, so parallel calls of the same
+    job stop at their next request instead of finishing their retries.
+    """
+
+    def __init__(self, max_calls: int, seconds: float):
+        self.max_calls = max_calls
+        self.seconds = seconds
+        self.deadline = time.monotonic() + seconds
+        self.calls = 0
+        self._lock = threading.Lock()
+
+    def charge(self) -> None:
+        with self._lock:
+            if time.monotonic() > self.deadline:
+                raise LLMBudgetExceeded(f"stopped after the time limit of {round(self.seconds / 60)} min")
+            if self.calls >= self.max_calls:
+                raise LLMBudgetExceeded(f"stopped after the budget of {self.max_calls} LLM calls")
+            self.calls += 1
+
+
+# Set by jobs.py around each attempt. Thread pools must carry it over with
+# contextvars.copy_context(); asyncio tasks inherit it on their own.
+llm_budget = contextvars.ContextVar("pageindex_llm_budget", default=None)
+
+# Callers that collect per-item failures (asyncio.gather with
+# return_exceptions) must still let these through and abort the job.
+ABORT_JOB_ERRORS = PROVIDER_BUSY_ERRORS + (LLMBudgetExceeded,)
+
+
+def charge_llm_call() -> None:
+    budget = llm_budget.get()
+    if budget is not None:
+        budget.charge()
+
 
 def _async_llm_slots():
     loop = asyncio.get_running_loop()
@@ -82,6 +140,7 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
     messages = list(chat_history) + [{"role": "user", "content": prompt}] if chat_history else [{"role": "user", "content": prompt}]
     with _llm_slots:
         for i in range(max_retries):
+            charge_llm_call()
             try:
                 response = litellm.completion(
                     model=model,
@@ -93,6 +152,8 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
                     finish_reason = "max_output_reached" if response.choices[0].finish_reason == "length" else "finished"
                     return content, finish_reason
                 return content
+            except NON_RETRYABLE_ERRORS:
+                raise
             except Exception as e:
                 print('************* Retrying *************')
                 logging.error(f"Error: {e}")
@@ -115,6 +176,7 @@ async def llm_acompletion(model, prompt):
     messages = [{"role": "user", "content": prompt}]
     async with _async_llm_slots():
         for i in range(max_retries):
+            charge_llm_call()
             try:
                 response = await litellm.acompletion(
                     model=model,
@@ -122,6 +184,8 @@ async def llm_acompletion(model, prompt):
                     **completion_kwargs(model),
                 )
                 return response.choices[0].message.content
+            except NON_RETRYABLE_ERRORS:
+                raise
             except Exception as e:
                 print('************* Retrying *************')
                 logging.error(f"Error: {e}")

@@ -1,4 +1,5 @@
 import base64
+import contextvars
 import json
 import logging
 import os
@@ -12,7 +13,10 @@ from concurrent.futures import ThreadPoolExecutor
 import litellm
 import pymupdf
 
-from pageindex.utils import PROVIDER_BUSY_ERRORS, _llm_slots, completion_kwargs, litellm_model, retry_sleep
+from pageindex.utils import (
+    NON_RETRYABLE_ERRORS, PROVIDER_BUSY_ERRORS, _llm_slots, charge_llm_call, completion_kwargs, litellm_model,
+    retry_sleep,
+)
 
 import store
 
@@ -107,6 +111,7 @@ def detect_figures(image: bytes) -> list | None:
         {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(image).decode()}},
     ]}]
     for attempt in range(MAX_RETRIES):
+        charge_llm_call()
         try:
             with _llm_slots:
                 response = litellm.completion(
@@ -120,6 +125,9 @@ def detect_figures(image: bytes) -> list | None:
             logging.error(f"Figure detection hit a busy provider: {e}")
             if attempt == MAX_RETRIES - 1:
                 raise
+        except NON_RETRYABLE_ERRORS as e:
+            logging.error(f"Figure detection failed, not retrying: {e}")
+            return None
         except Exception as e:
             logging.error(f"Figure detection failed: {e}")
             if attempt >= MAX_ANSWER_RETRIES - 1:
@@ -183,8 +191,13 @@ def extract(doc_id: str, pdf_path: str, on_progress=None) -> tuple[int, list[int
 
     if on_progress:
         on_progress(0, len(pages))
-    with ThreadPoolExecutor(max_workers=MAX_PARALLEL) as pool:
-        results = list(pool.map(process, pages))
+    # Same budget hand-over and early stop as ocr.augment_page_list.
+    pool = ThreadPoolExecutor(max_workers=MAX_PARALLEL)
+    try:
+        futures = [pool.submit(contextvars.copy_context().run, process, page) for page in pages]
+        results = [future.result() for future in futures]
+    finally:
+        pool.shutdown(cancel_futures=True)
     figures = [figure for result in results if result for figure in result]
     failed_pages = [page for page, result in zip(pages, results) if result is None]
     _write_atomic(

@@ -10,6 +10,7 @@ Failures degrade gracefully: a page that can't be transcribed keeps its
 original extracted text.
 """
 import base64
+import contextvars
 import logging
 import os
 import threading
@@ -19,7 +20,10 @@ from concurrent.futures import ThreadPoolExecutor
 import litellm
 import pymupdf
 
-from pageindex.utils import PROVIDER_BUSY_ERRORS, _llm_slots, completion_kwargs, count_tokens, litellm_model, retry_sleep
+from pageindex.utils import (
+    NON_RETRYABLE_ERRORS, PROVIDER_BUSY_ERRORS, _llm_slots, charge_llm_call, completion_kwargs, count_tokens,
+    litellm_model, retry_sleep,
+)
 
 # Vision model for transcription (any LiteLLM model id); "off" disables OCR.
 MODEL = litellm_model(os.environ.get("PAGEINDEX_OCR_MODEL", "gemini/gemini-4-hydrogen"))
@@ -54,10 +58,14 @@ def _transcribe_page(pdf_path: str, page_index: int) -> str:
         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
     ]}]
     for attempt in range(MAX_RETRIES):
+        charge_llm_call()
         try:
             with _llm_slots:  # shared global cap, see pageindex.utils
                 response = litellm.completion(model=MODEL, messages=messages, **completion_kwargs(MODEL))
             return response.choices[0].message.content or ""
+        except NON_RETRYABLE_ERRORS as e:
+            logging.error(f"OCR failed for page {page_index + 1}, not retrying: {e}")
+            return ""
         except Exception as e:
             logging.error(f"OCR failed for page {page_index + 1}: {e}")
             if attempt < MAX_RETRIES - 1:
@@ -95,8 +103,14 @@ def augment_page_list(pdf_path: str, page_list: list, model: str = None, on_prog
 
     if on_progress:
         on_progress(0, len(sparse))
-    with ThreadPoolExecutor(max_workers=MAX_PARALLEL) as pool:
-        transcriptions = list(pool.map(transcribe, sparse))
+    # Each task gets a copy of this thread's context so it is charged to the
+    # job's LLM budget; on the first abort the pages still waiting are dropped.
+    pool = ThreadPoolExecutor(max_workers=MAX_PARALLEL)
+    try:
+        futures = [pool.submit(contextvars.copy_context().run, transcribe, i) for i in sparse]
+        transcriptions = [future.result() for future in futures]
+    finally:
+        pool.shutdown(cancel_futures=True)
 
     out = list(page_list)
     transcribed = 0

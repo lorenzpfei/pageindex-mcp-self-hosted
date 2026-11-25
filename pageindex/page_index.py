@@ -91,10 +91,10 @@ async def check_title_appearance_in_start_concurrent(structure, page_list, model
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for item, result in zip(valid_items, results):
-        if isinstance(result, PROVIDER_BUSY_ERRORS):
-            # Provider busy (quota or overload): every remaining item would
-            # fail too. Abort so the document can be re-queued instead of
-            # indexed in degraded form.
+        if isinstance(result, ABORT_JOB_ERRORS):
+            # Provider busy (quota or overload) or the job's LLM budget is
+            # spent: every remaining item would fail too. Abort instead of
+            # indexing the document in degraded form.
             raise result
         if isinstance(result, Exception):
             if logger:
@@ -855,8 +855,8 @@ async def fix_incorrect_toc(toc_with_page_number, page_list, incorrect_results, 
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for item, result in zip(incorrect_results, results):
-        if isinstance(result, PROVIDER_BUSY_ERRORS):
-            raise result  # provider busy - abort so the document gets re-queued
+        if isinstance(result, ABORT_JOB_ERRORS):
+            raise result  # provider busy or budget spent - abort the job
         if isinstance(result, Exception):
             print(f"Processing item {item} generated an exception: {result}")
             continue
@@ -1016,7 +1016,8 @@ async def meta_processor(page_list, mode=None, toc_content=None, toc_page_list=N
 async def process_large_node_recursively(node, page_list, opt=None, logger=None):
     node_page_list = page_list[node['start_index']-1:node['end_index']]
     token_num = sum([page[1] for page in node_page_list])
-    
+    node_range = (node['start_index'], node['end_index'])
+
     if node['end_index'] - node['start_index'] > opt.max_page_num_each_node and token_num >= opt.max_token_num_each_node:
         print('large node:', node['title'], 'start_index:', node['start_index'], 'end_index:', node['end_index'], 'token_num:', token_num)
 
@@ -1034,9 +1035,13 @@ async def process_large_node_recursively(node, page_list, opt=None, logger=None)
             node['end_index'] = valid_node_toc_items[0]['start_index'] if valid_node_toc_items else node['end_index']
         
     if 'nodes' in node and node['nodes']:
+        # A child spanning the whole parent range means the split made no
+        # progress; recursing would send the same pages to the model again,
+        # level after level.
         tasks = [
             process_large_node_recursively(child_node, page_list, opt, logger=logger)
             for child_node in node['nodes']
+            if (child_node['start_index'], child_node['end_index']) != node_range
         ]
         await asyncio.gather(*tasks)
     

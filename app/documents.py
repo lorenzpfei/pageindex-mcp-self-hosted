@@ -119,7 +119,9 @@ def retry(doc_id: str) -> tuple[dict, int]:
         return {"error": "already queued or processing"}, 409
     if not os.path.isfile(entry.get("pdf_path", "")):
         return {"error": "PDF file is missing - delete and re-upload"}, 400
-    store.update_document(doc_id, status="queued", error="")
+    # An explicit retry is the only way to a fresh attempt budget; figure
+    # extraction runs after the ingest, so it gets a fresh one too.
+    store.update_document(doc_id, status="queued", error="", attempts=0, media_attempts=0)
     jobs.enqueue(doc_id)
     return {"doc_id": doc_id, "status": "queued"}, 200
 
@@ -143,6 +145,7 @@ def extract_figures(doc_id: str) -> tuple[dict, int]:
     error = media_blocker(entry)
     if error:
         return {"error": error}, 409 if "already" in error else 400
+    store.update_document(doc_id, media_attempts=0)
     jobs.enqueue_media(doc_id)
     return {"doc_id": doc_id, "media_status": "queued"}, 200
 
@@ -158,6 +161,9 @@ def status(doc_id: str) -> tuple[dict, int]:
         "uploaded_at": entry.get("uploaded_at", ""),
         "indexed_at": entry.get("indexed_at", ""),
         "media_status": entry.get("media_status", ""),
+        "attempts": entry.get("attempts") or 0,
+        "media_attempts": entry.get("media_attempts") or 0,
+        "max_attempts": jobs.MAX_ATTEMPTS,
     }
     if entry.get("error"):
         payload["error"] = entry["error"]
