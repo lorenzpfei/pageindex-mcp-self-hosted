@@ -27,7 +27,9 @@ How it works:
 - **Serve** (`app/server.py`): exposes `list_documents`, `get_document`,
   `get_document_structure`, `get_page_content`, `list_figures`,
   `get_document_image` and `get_page_image` as MCP tools over streamable
-  HTTP, protected by a bearer token. `get_page_content` lists the figures of
+  HTTP, protected by a bearer token. Writing clients additionally get
+  `upload_document`, `create_project`, `move_document` and `delete_document`
+  (see below). `get_page_content` lists the figures of
   each returned page (id, kind, caption). `search_pages` ranks the pages of all
   documents by keyword (BM25 over page text and section titles, from a cache
   `trees/<doc_id>.search.json` written after ingest). The connecting agent
@@ -81,6 +83,28 @@ How it works:
 
    Trees are saved to `<data>/trees/<doc_id>.json` and registered in
    `<data>/documents.json`.
+
+## MCP write tools
+
+Clients holding the full `PAGEINDEX_MCP_API_KEY` can also manage documents
+without the web UI. The derived read-only key is rejected by these four and
+keeps working for everything else.
+
+- `upload_document(url, content_base64, filename, project)` - add a document,
+  either from a URL the server downloads (`filename` defaults to the last URL
+  path segment) or from base64 content plus `filename`. `project` is the
+  folder; it is created when missing. PDFs come back as `"processing"` and are
+  queued for tree-building - poll `list_documents()` until they read `"done"`.
+  Anything else is stored as plain text and is readable immediately.
+- `create_project(name)` - create a folder.
+- `move_document(doc_id, project)` - move a document to another folder; an
+  empty `project` moves it to the top level.
+- `delete_document(doc_id)` - delete a document plus its tree, figures and
+  search cache. Not undoable.
+
+They share `app/documents.py` with `POST /api/upload`, `POST /api/projects`
+and `DELETE /api/documents/<doc_id>`, so the UI and MCP clients take the same
+storage and ingest path.
 
 ## Figure API
 
@@ -151,6 +175,17 @@ For plain local use (no Dokploy), swap the `networks` section for the
 commented-out `127.0.0.1` port binding in `docker-compose.yml`.
 
 `GET /health` is unauthenticated and returns `ok` - useful for uptime checks.
+
+## Tests
+
+```bash
+pip install -r requirements.txt pytest
+python -m pytest tests
+```
+
+They run the real ASGI app in-process and cover the write path: that the
+read-only key cannot upload, move or delete, and that uploads land in the
+registry the same way through the MCP tool and the multipart route.
 
 ## Persistence
 

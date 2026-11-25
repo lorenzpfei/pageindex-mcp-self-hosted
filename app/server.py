@@ -2,7 +2,8 @@
 """Self-hosted PageIndex MCP server + minimal document management web UI.
 
 MCP (streamable HTTP under /mcp): browse/retrieve tools backed by locally
-generated tree structures. Tree-building uses an LLM (OpenAI by default) once
+generated tree structures, plus write tools (upload/move/delete) that only
+the full API key may call. Tree-building uses an LLM (OpenAI by default) once
 per document; serving these tools afterwards is free - the calling agent
 (e.g. Claude) does the reasoning/navigation itself.
 
@@ -12,15 +13,19 @@ lives under /api/. Everything except / and /health requires the bearer token.
 Note: no `from __future__ import annotations` here - it turns annotations into
 strings, which breaks FastMCP's tool signature inspection in mcp 1.9.x.
 """
+import base64
+import contextvars
 import hashlib
 import hmac
 import json
 import os
 import secrets
 import sys
+import urllib.parse
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import httpx  # noqa: E402
 from mcp.server.fastmcp import FastMCP, Image  # noqa: E402
 from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, Response  # noqa: E402
 from starlette.routing import Route  # noqa: E402
@@ -31,8 +36,8 @@ from pageindex.retrieve import (  # noqa: E402
     get_document_structure as _get_document_structure,
     get_page_content as _get_page_content,
 )
-from pageindex.utils import get_number_of_pages  # noqa: E402
 
+import documents  # noqa: E402
 import jobs  # noqa: E402
 import media  # noqa: E402
 import search  # noqa: E402
@@ -49,6 +54,14 @@ STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 # Paths reachable without the bearer token. The index page contains no data;
 # its API calls are all authenticated.
 PUBLIC_PATHS = {"/", "/health", "/favicon.ico"}
+
+# Largest body upload_document() will pull from a URL - the container runs
+# with a hard memory cap and the download is buffered.
+MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024
+
+# Set per request by BearerAuthMiddleware. The derived read-only key reaches
+# /mcp (all read tools), so the write tools check this instead of the path.
+_write_allowed = contextvars.ContextVar("pageindex_write_allowed", default=False)
 
 # stateless + JSON responses: no in-memory sessions (survives redeploys without
 # breaking connected clients) and no SSE streams to upset reverse proxies.
@@ -240,6 +253,95 @@ def get_page_image(doc_id: str, page: int) -> Image:
     return Image(data=media.page_image(doc_id, entry["pdf_path"], page), format="jpeg")
 
 
+# ── MCP write tools (full API key only) ──────────────────────────────────────
+
+def _require_write() -> None:
+    if not _write_allowed.get():
+        raise ValueError("This tool needs the full API key; the read-only key may only read.")
+
+
+async def _download(url: str) -> bytes:
+    async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
+        async with client.stream("GET", url) as response:
+            response.raise_for_status()
+            data = bytearray()
+            async for chunk in response.aiter_bytes():
+                data.extend(chunk)
+                if len(data) > MAX_DOWNLOAD_BYTES:
+                    raise ValueError(f"download exceeds {MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB")
+    return bytes(data)
+
+
+@mcp.tool()
+async def upload_document(url: str = "", content_base64: str = "", filename: str = "", project: str = "") -> str:
+    """Add a document, either from a URL the server downloads or from base64 content.
+
+    Pass exactly one of url (filename defaults to the last URL path segment)
+    or content_base64 together with filename. project is the folder to file it
+    under and is created if it does not exist yet.
+
+    PDFs are queued for LLM tree-building and come back as status "processing";
+    poll list_documents() until the document reads "done". Everything else is
+    stored as plain text (UTF-8, max 10 MB) and is readable immediately.
+
+    Needs the full API key - the read-only key cannot upload.
+    """
+    _require_write()
+    if bool(url) == bool(content_base64):
+        return json.dumps({"error": "pass either url or content_base64"})
+    if url:
+        try:
+            data = await _download(url)
+        except Exception as e:
+            return json.dumps({"error": f"download failed: {e}"})
+        filename = filename or os.path.basename(urllib.parse.urlparse(url).path) or "download"
+    else:
+        if not filename:
+            return json.dumps({"error": "filename is required with content_base64"})
+        try:
+            data = base64.b64decode(content_base64, validate=True)
+        except Exception:
+            return json.dumps({"error": "content_base64 is not valid base64"})
+    payload, _ = documents.save_upload(filename, data, project.strip())
+    return json.dumps(payload, ensure_ascii=False)
+
+
+@mcp.tool()
+def create_project(name: str) -> str:
+    """Create a folder (project) that documents can be filed under.
+
+    Needs the full API key.
+    """
+    _require_write()
+    error = documents.create_project(name.strip())
+    return json.dumps({"error": error} if error else {"project": name.strip()}, ensure_ascii=False)
+
+
+@mcp.tool()
+def move_document(doc_id: str, project: str = "") -> str:
+    """Move a document into another folder; an empty project moves it to the top level.
+
+    The folder is created if it does not exist yet. Needs the full API key.
+    """
+    _require_write()
+    project = project.strip()
+    if not documents.move(doc_id, project):
+        return json.dumps({"error": f"Document {doc_id} not found"})
+    return json.dumps({"doc_id": doc_id, "project": project}, ensure_ascii=False)
+
+
+@mcp.tool()
+def delete_document(doc_id: str) -> str:
+    """Delete a document and everything derived from it (tree, figures, search cache).
+
+    This cannot be undone. Needs the full API key.
+    """
+    _require_write()
+    if not documents.delete(doc_id):
+        return json.dumps({"error": f"Document {doc_id} not found"})
+    return json.dumps({"deleted": doc_id})
+
+
 # ── Web UI / JSON API ────────────────────────────────────────────────────────
 
 async def index(request):
@@ -281,9 +383,9 @@ async def api_create_project(request):
     except Exception:
         return JSONResponse({"error": "invalid JSON"}, status_code=400)
     name = (body.get("name") or "").strip()
-    if not name or len(name) > 100:
-        return JSONResponse({"error": "invalid project name"}, status_code=400)
-    store.add_project(name)
+    error = documents.create_project(name)
+    if error:
+        return JSONResponse({"error": error}, status_code=400)
     return JSONResponse({"name": name}, status_code=201)
 
 
@@ -435,54 +537,14 @@ async def api_upload(request):
     project = (form.get("project") or "").strip()
     if upload is None or not getattr(upload, "filename", None):
         return JSONResponse({"error": "missing file"}, status_code=400)
-
-    doc_id = store.unique_doc_id(store.slugify(upload.filename))
-
-    # Anything that isn't a PDF is treated as plain text (code, notebooks,
-    # markdown, ...): stored without LLM ingest, immediately "done".
-    if not upload.filename.lower().endswith(".pdf"):
-        raw = await upload.read(textfiles.MAX_TEXT_BYTES + 1)
-        try:
-            text = textfiles.convert_upload(upload.filename, raw)
-        except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=400)
-        os.makedirs(store.FILES_DIR, exist_ok=True)
-        path = os.path.join(store.FILES_DIR, f"{doc_id}.txt")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(text)
-        store.create_document(
-            doc_id, doc_name=upload.filename, project=project, pdf_path=path,
-            page_count=None, doc_type="text", line_count=text.count("\n") + 1, status="done",
-        )
-        return JSONResponse({"doc_id": doc_id, "status": "done"}, status_code=201)
-
-    os.makedirs(store.PDF_DIR, exist_ok=True)
-    pdf_path = os.path.join(store.PDF_DIR, f"{doc_id}.pdf")
-    with open(pdf_path, "wb") as f:
-        while chunk := await upload.read(1 << 20):
-            f.write(chunk)
-
-    try:
-        page_count = get_number_of_pages(pdf_path)
-    except Exception:
-        os.remove(pdf_path)
-        return JSONResponse({"error": "file is not a readable PDF"}, status_code=400)
-
-    store.create_document(doc_id, doc_name=upload.filename, project=project, pdf_path=pdf_path, page_count=page_count)
-    jobs.enqueue(doc_id)
-    return JSONResponse({"doc_id": doc_id, "status": "processing"}, status_code=201)
+    payload, status = documents.save_upload(upload.filename, await upload.read(), project)
+    return JSONResponse(payload, status_code=status)
 
 
 async def api_delete_document(request):
     doc_id = request.path_params["doc_id"]
-    entry = store.delete_document(doc_id)
-    if not entry:
+    if not documents.delete(doc_id):
         return JSONResponse({"error": "not found"}, status_code=404)
-    for path in (entry.get("pdf_path"), entry.get("tree_path"), entry.get("pages_path")):
-        if path and os.path.isfile(path):
-            os.remove(path)
-    media.delete(doc_id)
-    search.remove(doc_id)
     return JSONResponse({"deleted": doc_id})
 
 
@@ -502,16 +564,20 @@ class BearerAuthMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http" and API_KEY and scope["path"] not in PUBLIC_PATHS:
-            auth = ""
-            for name, value in scope.get("headers", []):
-                if name == b"authorization":
-                    auth = value.decode("latin-1")
-                    break
-            if not secrets.compare_digest(auth, f"Bearer {API_KEY}") and not _read_only_allowed(scope, auth):
-                response = JSONResponse({"error": "unauthorized"}, status_code=401)
-                await response(scope, receive, send)
-                return
+        if scope["type"] == "http":
+            full_key = not API_KEY
+            if API_KEY and scope["path"] not in PUBLIC_PATHS:
+                auth = ""
+                for name, value in scope.get("headers", []):
+                    if name == b"authorization":
+                        auth = value.decode("latin-1")
+                        break
+                full_key = secrets.compare_digest(auth, f"Bearer {API_KEY}")
+                if not full_key and not _read_only_allowed(scope, auth):
+                    response = JSONResponse({"error": "unauthorized"}, status_code=401)
+                    await response(scope, receive, send)
+                    return
+            _write_allowed.set(full_key)
         await self.app(scope, receive, send)
 
 
