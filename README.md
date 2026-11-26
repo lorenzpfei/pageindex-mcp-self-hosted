@@ -1,16 +1,25 @@
 # PageIndex MCP (self-hosted)
 
 A self-hosted MCP server exposing [PageIndex](https://github.com/VectifyAI/PageIndex)'s
-vectorless, reasoning-based document retrieval. The `pageindex/` directory is a
-vendored copy of VectifyAI's open-source PageIndex package (MIT licensed, see
-`pageindex/LICENSE.upstream`).
+vectorless, reasoning-based document retrieval. It uses VectifyAI's open-source
+PageIndex package (MIT licensed) as a pinned dependency (`pageindex==0.7.5` in
+`requirements.txt`); the server, ingest pipeline and retrieval tools live in `app/`.
 
 How it works:
 
-- **Ingest** (`app/ingest.py`): builds a hierarchical "table of contents" tree
-  for a PDF using an LLM (Gemini Flash by default, configurable via
-  `PAGEINDEX_MODEL` / `pageindex/config.yaml` + LiteLLM). This costs a small
-  amount of LLM usage, once per document.
+- **Ingest** (`app/ingest.py`, `app/jobs.py`): builds a hierarchical "table
+  of contents" tree for a PDF, once per document, in one of two modes:
+  - **flash** (default): the tree comes from the PDF's layout and bookmarks
+    without an LLM; the LLM (`PAGEINDEX_SUMMARY_MODEL`) only refines it and
+    writes the node summaries and the document description. Fast and cheap.
+  - **standard**: the LLM (`PAGEINDEX_MODEL`) builds the tree from the page
+    texts, then summarizes it. Used when more than 10% of the pages needed
+    OCR (flash cannot read scans), when flash finds no usable structure or a
+    page range outside the PDF, or always with `PAGEINDEX_INDEX_MODE=standard`.
+
+  The web UI shows each document's index mode and the tokens the tree build
+  used. Documents indexed before flash existed keep their tree until you
+  re-index them (retry button in the web UI).
 - **Hybrid OCR** (`app/ocr.py`): pages whose embedded text layer is too sparse
   (scans, image-heavy slides) are rendered and transcribed by a vision model
   during ingest; born-digital text pages are read losslessly for free. The
@@ -30,7 +39,13 @@ How it works:
   HTTP, protected by a bearer token. `get_document_status` follows a
   document through ingest. Clients holding the full key additionally get the
   write tools (see below). `get_page_content` lists the figures of
-  each returned page (id, kind, caption). `search_pages` ranks the pages of all
+  each returned page (id, kind, caption). Responses stay under ~95,000
+  characters: a larger structure is returned in parts
+  (`get_document_structure(doc_id, part=2)`, with `pagination.has_more`),
+  and a page range that is too large returns the leading pages plus
+  `omitted_pages` to request next. The `cited_answer` prompt (format `cite`
+  or `markdown`) tells the agent to answer only from the documents and cite
+  page numbers. `search_pages` ranks the pages of all
   documents by keyword (BM25 over page text and section titles, from a cache
   `trees/<doc_id>.search.json` written after ingest). The connecting agent
   (e.g. Claude) does the navigation/reasoning itself - serving is free after ingest.
@@ -67,11 +82,15 @@ How it works:
    - `PAGEINDEX_MCP_API_KEY` - bearer token clients must send, e.g. `openssl rand -hex 32`.
      Read-only clients (MCP tools and GET endpoints only, no upload or delete) can use the derived key
      `python3 -c 'import hashlib,hmac,sys; print(hmac.new(sys.argv[1].encode(), b"pageindex-read-only", hashlib.sha256).hexdigest())' <PAGEINDEX_MCP_API_KEY>`
-   - optional: `PAGEINDEX_MODEL` (any LiteLLM model id for tree-building;
-     default gemini/gemini-4-hydrogen), `PAGEINDEX_OCR_MODEL` (vision model
+   - optional: `PAGEINDEX_MODEL` (any LiteLLM model id for standard-mode
+     tree-building; default gemini/gemini-4-hydrogen), `PAGEINDEX_SUMMARY_MODEL`
+     (summaries and description; default `PAGEINDEX_MODEL`),
+     `PAGEINDEX_INDEX_MODE` (`auto` or `standard`), `PAGEINDEX_OCR_MODEL` (vision model
      for text-poor pages, "off" to disable), `PAGEINDEX_INGEST_WORKERS`
-     (parallel PDF ingests, default 2) and `PAGEINDEX_MAX_CONCURRENT_LLM`
-     (global cap on simultaneous LLM calls, default 8 - protects against
+     (parallel PDF ingests, default 2; flash ingests run one at a time
+     because flash parses with one process per CPU) and `PAGEINDEX_MAX_CONCURRENT_LLM`
+     (cap on simultaneous OCR/figure calls and on the summary calls of a
+     flash ingest, default 8 - protects against
      provider rate limits; if an ingest still hits a rate limit or the
      model is overloaded, it is re-queued automatically with a growing
      cooldown, up to 3 attempts in total)
@@ -208,6 +227,10 @@ published on the host - the bearer token must only travel over HTTPS.
 
 For plain local use (no Dokploy), swap the `networks` section for the
 commented-out `127.0.0.1` port binding in `docker-compose.yml`.
+
+The image sets `PYTHON_CPU_COUNT=4`, which caps the flash parser pool at 3
+processes so a parse fits the container's 3 GB memory limit (`mem_limit` in
+`docker-compose.yml`).
 
 `GET /health` is unauthenticated and returns `ok` - useful for uptime checks.
 

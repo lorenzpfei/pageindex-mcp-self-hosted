@@ -20,9 +20,11 @@ from concurrent.futures import ThreadPoolExecutor
 import litellm
 import pymupdf
 
-from pageindex.utils import (
-    NON_RETRYABLE_ERRORS, PROVIDER_BUSY_ERRORS, _llm_slots, charge_llm_call, completion_kwargs, count_tokens,
-    litellm_model, retry_sleep,
+from pageindex.utils import count_tokens
+
+from llm import (
+    NON_RETRYABLE_ERRORS, PROVIDER_BUSY_ERRORS, LLMBudgetExceeded, _llm_slots, completion_kwargs, litellm_model,
+    retry_sleep,
 )
 
 # Vision model for transcription (any LiteLLM model id); "off" disables OCR.
@@ -58,11 +60,12 @@ def _transcribe_page(pdf_path: str, page_index: int) -> str:
         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
     ]}]
     for attempt in range(MAX_RETRIES):
-        charge_llm_call()
         try:
-            with _llm_slots:  # shared global cap, see pageindex.utils
+            with _llm_slots:  # shared global cap, see llm.py
                 response = litellm.completion(model=MODEL, messages=messages, **completion_kwargs(MODEL))
             return response.choices[0].message.content or ""
+        except LLMBudgetExceeded:
+            raise
         except NON_RETRYABLE_ERRORS as e:
             logging.error(f"OCR failed for page {page_index + 1}, not retrying: {e}")
             return ""

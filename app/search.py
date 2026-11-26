@@ -20,7 +20,7 @@ from collections import Counter
 import PyPDF2
 
 import store
-from pageindex.utils import strip_surrogates
+from llm import strip_surrogates
 
 CACHE_VERSION = 1
 TEXT_BLOCK_LINES = 60

@@ -5,7 +5,6 @@ busy, container restart, a runaway inside one run - has to stop at a hard
 limit and leave the document "failed" until someone retries it on purpose.
 """
 import asyncio
-import importlib
 import os
 import queue
 import time
@@ -13,15 +12,14 @@ from types import SimpleNamespace
 
 import litellm
 import pytest
+from pageindex import page_index_classic as tree_builder
+from pageindex.utils import llm_completion
 
 import documents
 import jobs
+import llm
 import ocr
 import store
-from pageindex import utils as llm
-
-# pageindex/__init__ star-exports a function named page_index that shadows the module.
-tree_builder = importlib.import_module("pageindex.page_index")
 
 
 @pytest.fixture
@@ -199,7 +197,7 @@ def test_the_budget_reaches_into_the_ocr_thread_pool(monkeypatch):
     calls = []
     monkeypatch.setattr(ocr, "MODEL", "gemini/test")
     monkeypatch.setattr(ocr, "_render_page_png", lambda pdf, i: b"png")
-    monkeypatch.setattr(ocr.litellm, "completion", lambda **kw: calls.append(1) or fake_response())
+    monkeypatch.setattr(llm, "_completion", lambda **kw: calls.append(1) or fake_response())
     sparse_pages = [("", 0)] * 40
 
     token = llm.llm_budget.set(llm.LLMBudget(max_calls=5, seconds=60))
@@ -218,15 +216,39 @@ def test_requests_that_cannot_succeed_are_not_retried(monkeypatch):
         calls.append(1)
         raise litellm.BadRequestError(message="prompt too long", model="m", llm_provider="gemini")
 
-    monkeypatch.setattr(llm.litellm, "completion", bad_request)
+    monkeypatch.setattr(llm, "_completion", bad_request)
     with pytest.raises(litellm.BadRequestError):
-        llm.llm_completion("gemini/test", "prompt")
+        llm_completion("gemini/test", "prompt")
     assert len(calls) == 1
 
 
-def test_every_request_carries_a_timeout():
-    for model in ("gemini/test", "gpt-test", None):
-        assert llm.completion_kwargs(model)["timeout"] > 0
+def test_every_request_carries_a_timeout(monkeypatch):
+    sent = []
+
+    async def async_fake(**kwargs):
+        sent.append(kwargs)
+
+    monkeypatch.setattr(llm, "_completion", lambda **kwargs: sent.append(kwargs))
+    monkeypatch.setattr(llm, "_acompletion", async_fake)
+    litellm.completion(model="gemini/test", messages=[])
+    asyncio.run(litellm.acompletion(model="gemini/test", messages=[]))
+    assert len(sent) == 2 and all(kwargs["timeout"] > 0 for kwargs in sent)
+
+
+def test_the_budget_covers_the_library_calls(monkeypatch):
+    calls = []
+    monkeypatch.setattr(llm, "_completion", lambda **kw: calls.append(1) or fake_response())
+
+    token = llm.llm_budget.set(llm.LLMBudget(max_calls=2, seconds=60))
+    try:
+        llm_completion("gemini/test", "prompt")
+        llm_completion("gemini/test", "prompt")
+        with pytest.raises(Exception) as raised:
+            llm_completion("gemini/test", "prompt")
+    finally:
+        llm.llm_budget.reset(token)
+    assert len(calls) == 2
+    assert isinstance(jobs._budget_exceeded(raised.value), llm.LLMBudgetExceeded)
 
 
 def test_a_split_that_makes_no_progress_is_not_recursed_into(monkeypatch):

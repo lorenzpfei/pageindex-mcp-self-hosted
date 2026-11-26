@@ -15,12 +15,10 @@ import argparse
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from pageindex.utils import get_number_of_pages
 
-from pageindex.utils import get_number_of_pages  # noqa: E402
-
-import jobs  # noqa: E402
-import store  # noqa: E402
+import jobs
+import store
 
 
 def main() -> int:

@@ -16,6 +16,7 @@ strings, which breaks FastMCP's tool signature inspection in mcp 1.9.x.
 import asyncio
 import base64
 import contextvars
+import difflib
 import hashlib
 import hmac
 import ipaddress
@@ -26,26 +27,24 @@ import socket
 import sys
 import urllib.parse
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import httpx
+from mcp.server.fastmcp import FastMCP, Image
+from pageindex.agent_tools import _format_page_spec, _split_structure
+from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, Response
+from starlette.routing import Route
 
-import httpx  # noqa: E402
-from mcp.server.fastmcp import FastMCP, Image  # noqa: E402
-from starlette.responses import FileResponse, JSONResponse, PlainTextResponse, Response  # noqa: E402
-from starlette.routing import Route  # noqa: E402
-
-from pageindex.retrieve import (  # noqa: E402
+import documents
+import jobs
+import media
+import search
+import store
+import textfiles
+from retrieve import (
     _parse_pages,
     get_document as _get_document,
     get_document_structure as _get_document_structure,
     get_page_content as _get_page_content,
 )
-
-import documents  # noqa: E402
-import jobs  # noqa: E402
-import media  # noqa: E402
-import search  # noqa: E402
-import store  # noqa: E402
-import textfiles  # noqa: E402
 
 API_KEY = os.environ.get("PAGEINDEX_MCP_API_KEY")
 # Derived so read-only clients need no extra secret in the deployment.
@@ -53,6 +52,8 @@ READ_API_KEY = hmac.new(API_KEY.encode(), b"pageindex-read-only", hashlib.sha256
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+MAX_RESPONSE_CHARS = 95_000
+TRUNCATION_ROOM = 1_000
 
 # Paths reachable without the bearer token. The index page contains no data;
 # its API calls are all authenticated.
@@ -79,9 +80,12 @@ mcp = FastMCP(
 # ── MCP tools ────────────────────────────────────────────────────────────────
 
 def _doc_info_or_error(doc_id: str):
-    entry = store.load_registry().get(doc_id)
+    registry = store.load_registry()
+    entry = registry.get(doc_id)
     if not entry:
-        return None, json.dumps({"error": f"Document {doc_id} not found"})
+        similar = difflib.get_close_matches(doc_id, list(registry), n=3, cutoff=0.5)
+        hint = f". Did you mean: {', '.join(similar)}?" if similar else ""
+        return None, json.dumps({"error": f"Document {doc_id} not found{hint}"})
     if entry.get("status") != "done":
         return None, json.dumps(
             {"error": f"Document {doc_id} is not ready (status: {entry.get('status')}, error: {entry.get('error', '')})"}
@@ -153,13 +157,17 @@ def get_document_status(doc_id: str) -> str:
 
 
 @mcp.tool()
-def get_document_structure(doc_id: str) -> str:
+def get_document_structure(doc_id: str, part: int = 1) -> str:
     """Get the hierarchical tree structure (titles, sections, summaries, page ranges) of a document.
 
     For PDFs over ~20 pages, call this first to find relevant sections, then
     use get_page_content() with targeted page ranges. Text documents have no
     tree - this returns a single section spanning all lines; just fetch the
     line ranges you need via get_page_content().
+
+    A structure too large for one response comes in parts:
+    {"structure": [...], "pagination": {"part", "total_parts", "has_more"}}.
+    Request the next one with part=2, 3, ... while has_more is true.
     """
     doc_info, error = _doc_info_or_error(doc_id)
     if error:
@@ -168,7 +176,18 @@ def get_document_structure(doc_id: str) -> str:
         return json.dumps(
             [{"title": doc_info.get("doc_name", doc_id), "start_line": 1, "end_line": doc_info.get("line_count")}]
         )
-    return _get_document_structure(documents={doc_id: doc_info}, doc_id=doc_id)
+    content = _get_document_structure(documents={doc_id: doc_info}, doc_id=doc_id)
+    if len(content) <= MAX_RESPONSE_CHARS:
+        return content
+    chunks = _split_structure(json.loads(content), MAX_RESPONSE_CHARS - TRUNCATION_ROOM)
+    part = min(max(part, 1), len(chunks))
+    return json.dumps(
+        {
+            "structure": chunks[part - 1],
+            "pagination": {"part": part, "total_parts": len(chunks), "has_more": part < len(chunks)},
+        },
+        ensure_ascii=False,
+    )
 
 
 @mcp.tool()
@@ -181,6 +200,10 @@ def get_page_content(doc_id: str, pages: str) -> str:
 
     PDF pages list their extracted figures (id, kind, caption) under
     "figures"; fetch one with get_document_image(doc_id, id).
+
+    If the result would be too large, only the leading pages are returned as
+    {"content": [...], "omitted_pages": "41-80", "note": "..."}; request the
+    omitted pages in a follow-up call.
     """
     doc_info, error = _doc_info_or_error(doc_id)
     if error:
@@ -190,9 +213,51 @@ def get_page_content(doc_id: str, pages: str) -> str:
             line_nums = _parse_pages(pages)
         except (ValueError, AttributeError) as e:
             return json.dumps({"error": f'Invalid pages format: {pages!r}. Use "5-7", "3,8", or "12". Error: {e}'})
-        return textfiles.line_content(doc_info["path"], line_nums)
-    content = _get_page_content(documents={doc_id: doc_info}, doc_id=doc_id, pages=pages)
-    return _with_figures(doc_id, content)
+        return _text_within_budget(doc_info, line_nums)
+    content = _with_figures(doc_id, _get_page_content(documents={doc_id: doc_info}, doc_id=doc_id, pages=pages))
+    if len(content) <= MAX_RESPONSE_CHARS:
+        return content
+    page_items = json.loads(content)
+    kept, size = 0, 0
+    for item in page_items:
+        size += len(json.dumps(item, ensure_ascii=False)) + 2
+        if kept and size > MAX_RESPONSE_CHARS - TRUNCATION_ROOM:
+            break
+        kept += 1
+    if kept == len(page_items):
+        return content
+    return _truncated(page_items[:kept], [item["page"] for item in page_items[kept:]])
+
+
+def _text_within_budget(doc_info: dict, line_nums: list[int]) -> str:
+    content = textfiles.line_content(doc_info["path"], line_nums)
+    if len(content) <= MAX_RESPONSE_CHARS:
+        return content
+    low, high = 1, len(line_nums)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(textfiles.line_content(doc_info["path"], line_nums[:middle])) <= MAX_RESPONSE_CHARS - TRUNCATION_ROOM:
+            low = middle
+        else:
+            high = middle - 1
+    if low == len(line_nums):
+        return content
+    return _truncated(
+        json.loads(textfiles.line_content(doc_info["path"], line_nums[:low])),
+        [n for n in line_nums[low:] if n <= doc_info["line_count"]],
+    )
+
+
+def _truncated(content: list, omitted: list[int]) -> str:
+    omitted_pages = _format_page_spec(omitted)
+    return json.dumps(
+        {
+            "content": content,
+            "omitted_pages": omitted_pages,
+            "note": f"Response size limit reached; request the omitted pages {omitted_pages} in a follow-up call.",
+        },
+        ensure_ascii=False,
+    )
 
 
 def _with_figures(doc_id: str, content: str) -> str:
@@ -452,6 +517,33 @@ def delete_project(name: str) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+GROUNDING_PROMPT = """GROUNDING
+- Answer only from the documents on this server. Call get_page_content() and state only what was actually read there.
+- Never fill a gap from general knowledge. When the documents do not answer the question, say so.
+
+"""
+
+CITATION_PROMPTS = {
+    "cite": GROUNDING_PROMPT + """CITATIONS
+- Cite only statements supported by tool outputs: <cite doc="{doc_name}" page="{page}"/>. Place it immediately after the claim.
+- Each tag references a single page number (for text documents: a line number). Use separate tags for several pages.""",
+    "markdown": GROUNDING_PROMPT + """CITATIONS
+- Cite only statements supported by tool outputs, as a bracketed reference: [{doc_name}, p. {page}]. Place it immediately after the claim.
+- Each reference names a single page number (for text documents: a line number). Use separate references for several pages.""",
+}
+
+
+@mcp.prompt()
+def cited_answer(format: str = "cite") -> str:
+    """Instructions for answering from these documents with page citations.
+
+    format: "cite" for <cite doc=".." page=".."/> tags, "markdown" for [doc, p. N] references.
+    """
+    if format not in CITATION_PROMPTS:
+        raise ValueError(f"format must be one of {', '.join(CITATION_PROMPTS)}")
+    return CITATION_PROMPTS[format]
+
+
 # ── Web UI / JSON API ────────────────────────────────────────────────────────
 
 async def index(request):
@@ -480,6 +572,8 @@ async def api_state(request):
             "media_status": e.get("media_status", ""),
             "media_error": e.get("media_error", ""),
             "figure_count": e.get("figure_count"),
+            "index_mode": e.get("index_mode", ""),
+            "usage": e.get("usage"),
             "progress": jobs.progress(doc_id),
         }
         for doc_id, e in db["documents"].items()

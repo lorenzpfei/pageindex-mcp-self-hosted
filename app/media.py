@@ -13,12 +13,11 @@ from concurrent.futures import ThreadPoolExecutor
 import litellm
 import pymupdf
 
-from pageindex.utils import (
-    NON_RETRYABLE_ERRORS, PROVIDER_BUSY_ERRORS, _llm_slots, charge_llm_call, completion_kwargs, litellm_model,
+import store
+from llm import (
+    NON_RETRYABLE_ERRORS, PROVIDER_BUSY_ERRORS, LLMBudgetExceeded, _llm_slots, completion_kwargs, litellm_model,
     retry_sleep,
 )
-
-import store
 
 MODEL = litellm_model(os.environ.get("PAGEINDEX_FIGURE_MODEL", "gemini/gemini-4-hydrogen"))
 MEDIA_DIR = os.path.join(store.DATA_DIR, "media")
@@ -111,7 +110,6 @@ def detect_figures(image: bytes) -> list | None:
         {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(image).decode()}},
     ]}]
     for attempt in range(MAX_RETRIES):
-        charge_llm_call()
         try:
             with _llm_slots:
                 response = litellm.completion(
@@ -125,6 +123,8 @@ def detect_figures(image: bytes) -> list | None:
             logging.error(f"Figure detection hit a busy provider: {e}")
             if attempt == MAX_RETRIES - 1:
                 raise
+        except LLMBudgetExceeded:
+            raise
         except NON_RETRYABLE_ERRORS as e:
             logging.error(f"Figure detection failed, not retrying: {e}")
             return None

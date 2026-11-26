@@ -1,9 +1,8 @@
-# PageIndex (vendored) dependencies
-litellm==1.83.7
+# PageIndex + ingest dependencies
+pageindex==0.7.5
+litellm==1.111.0
 pymupdf==1.26.4
 PyPDF2==3.0.1
-python-dotenv==1.0.1  # litellm 1.83.7 pins exactly this version
-pyyaml==6.0.2
 
 # MCP server + web UI
 httpx==0.28.1

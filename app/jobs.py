@@ -21,20 +21,36 @@ import time
 import traceback
 from datetime import datetime, timezone
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-from pageindex import page_index_main  # noqa: E402
-from pageindex.utils import (  # noqa: E402
-    PROVIDER_BUSY_ERRORS, ConfigLoader, LLMBudget, get_page_tokens, litellm_model, llm_budget,
+from pageindex.flash import page_index_flash
+from pageindex.flash.api import flash_rejection_reason
+from pageindex.page_index_classic import page_index_main
+from pageindex.utils import (
+    ConfigLoader,
+    LLMRetriesExhausted,
+    _llm_usage,
+    create_clean_structure_for_description,
+    format_structure,
+    generate_doc_description,
+    get_page_tokens,
+    write_node_id,
 )
 
-import media  # noqa: E402
-import ocr  # noqa: E402
-import search  # noqa: E402
-import store  # noqa: E402
+import media
+import ocr
+import search
+import store
+from llm import (
+    MAX_CONCURRENT_LLM, PROVIDER_BUSY_ERRORS, LLMBudget, LLMBudgetExceeded, litellm_model, llm_budget,
+    strip_surrogates,
+)
 
 WORKERS = max(1, int(os.environ.get("PAGEINDEX_INGEST_WORKERS", "2")))
-MODEL = litellm_model(os.environ.get("PAGEINDEX_MODEL", ""))  # empty = pageindex/config.yaml default
+MODEL = litellm_model(os.environ.get("PAGEINDEX_MODEL") or "gemini/gemini-4-hydrogen")
+SUMMARY_MODEL = litellm_model(os.environ.get("PAGEINDEX_SUMMARY_MODEL") or MODEL)
+INDEX_MODE = os.environ.get("PAGEINDEX_INDEX_MODE") or "auto"
+if INDEX_MODE not in ("auto", "standard"):
+    raise ValueError(f"PAGEINDEX_INDEX_MODE must be 'auto' or 'standard', got {INDEX_MODE!r}")
+MAX_OCR_SHARE_FOR_FLASH = 0.1
 
 MAX_ATTEMPTS = 3
 # Per attempt. A normal ingest needs a handful of calls per page; this leaves
@@ -56,6 +72,9 @@ _started = False
 # neither state, so a document never runs twice at once.
 _scheduled_lock = threading.Lock()
 _scheduled: set[tuple[str, str]] = set()
+
+# Flash parses with one spawned process per CPU; two at once would not fit the container's memory limit.
+_flash_lock = threading.Lock()
 
 _progress_lock = threading.Lock()
 _progress: dict[str, dict] = {}
@@ -183,24 +202,30 @@ def build_tree(doc_id: str) -> bool:
     if not entry or not _begin_attempt("tree", doc_id, entry):
         return False
     budget = llm_budget.set(_attempt_budget(entry))
+    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+             "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+             "completion_tokens_details": {"reasoning_tokens": 0}}
+    usage_token = _llm_usage.set(usage)
     try:
-        overrides = {"if_add_doc_description": "yes"}
-        if MODEL:
-            overrides["model"] = MODEL
-        opt = ConfigLoader().load(overrides)
-        _check_api_keys(opt.model, *([ocr.MODEL] if ocr.enabled() else []))
+        _check_api_keys(SUMMARY_MODEL, *([MODEL] if INDEX_MODE == "standard" else []),
+                        *([ocr.MODEL] if ocr.enabled() else []))
 
         _set_progress(doc_id, "reading")
-        page_list = get_page_tokens(entry["pdf_path"], model=opt.model)
+        page_list = [(strip_surrogates(text), tokens) for text, tokens in get_page_tokens(entry["pdf_path"], model=MODEL)]
         page_list, ocr_pages = ocr.augment_page_list(
-            entry["pdf_path"], page_list, model=opt.model,
+            entry["pdf_path"], page_list, model=MODEL,
             on_progress=lambda done, total: _set_progress(doc_id, "ocr", done, total),
         )
         _set_progress(doc_id, "tree")
         if ocr_pages:
             print(f"OCR transcribed {ocr_pages} text-poor page(s) for {doc_id}")
 
-        result = page_index_main(entry["pdf_path"], opt, page_list=page_list)
+        result = None
+        if INDEX_MODE == "auto" and ocr_pages <= MAX_OCR_SHARE_FOR_FLASH * len(page_list):
+            result = _index_flash(entry["pdf_path"], len(page_list))
+        index_mode = "flash" if result else "standard"
+        if not result:
+            result = _index_standard(entry["pdf_path"], page_list)
         os.makedirs(store.TREE_DIR, exist_ok=True)
         tree_path = os.path.join(store.TREE_DIR, f"{doc_id}.json")
         with open(tree_path, "w", encoding="utf-8") as f:
@@ -228,8 +253,10 @@ def build_tree(doc_id: str) -> bool:
             status="done",
             error="",
             indexed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            index_mode=index_mode,
+            usage={key: usage[key] for key in ("prompt_tokens", "completion_tokens", "total_tokens")},
         )
-        print(f"Ingest done: {doc_id}")
+        print(f"Ingest done: {doc_id} ({index_mode}, {usage['total_tokens']} tokens)")
         try:
             search.build(doc_id)
         except Exception as e:
@@ -238,6 +265,7 @@ def build_tree(doc_id: str) -> bool:
         if media.enabled():
             enqueue_media(doc_id)
     except Exception as e:
+        e = _budget_exceeded(e) or e
         if _is_provider_busy(e):
             return _provider_busy("tree", doc_id, e)
         msg = str(e) if isinstance(e, IngestError) else f"{type(e).__name__}: {e}"
@@ -245,15 +273,64 @@ def build_tree(doc_id: str) -> bool:
         print(f"Ingest failed: {doc_id}", file=sys.stderr)
         traceback.print_exc()
     finally:
+        _llm_usage.reset(usage_token)
         llm_budget.reset(budget)
         _clear_progress(doc_id)
     return False
 
 
+def _index_flash(pdf_path: str, page_count: int) -> dict | None:
+    with _flash_lock:
+        result = page_index_flash(
+            pdf_path, summary=True, summary_model=SUMMARY_MODEL, optimize="full",
+            optimize_model=SUMMARY_MODEL, summary_concurrency=MAX_CONCURRENT_LLM,
+        )
+    structure = result.get("structure", [])
+    reason = flash_rejection_reason(result)
+    if reason or not _within_pages(structure, page_count):
+        print(f"Flash index rejected for {pdf_path}, falling back to standard: {reason or 'pages out of range'}")
+        return None
+    write_node_id(structure)
+    description = generate_doc_description(
+        create_clean_structure_for_description(structure, top_level_only=True), model=SUMMARY_MODEL,
+    )
+    return {
+        "doc_name": result.get("doc_name", ""),
+        "doc_description": description,
+        "structure": format_structure(
+            structure, order=["title", "node_id", "start_index", "end_index", "key_items", "summary", "nodes"],
+        ),
+    }
+
+
+def _within_pages(nodes: list, page_count: int) -> bool:
+    for node in nodes or []:
+        start, end = node.get("start_index"), node.get("end_index")
+        if start is not None and end is not None and not (1 <= start and end <= page_count):
+            return False
+        if not _within_pages(node.get("nodes"), page_count):
+            return False
+    return True
+
+
+def _index_standard(pdf_path: str, page_list: list) -> dict:
+    _check_api_keys(MODEL)
+    opt = ConfigLoader().load({"model": MODEL, "summary_model": SUMMARY_MODEL, "if_add_doc_description": "yes"})
+    return page_index_main(pdf_path, opt, page_list=page_list)
+
+
 def _is_provider_busy(e: Exception) -> bool:
+    if isinstance(e, LLMRetriesExhausted) and e.status_code in (429, 503):
+        return True
     return isinstance(e, PROVIDER_BUSY_ERRORS) or any(
         name in str(e) for name in ("RateLimitError", "ServiceUnavailableError")
     )
+
+
+def _budget_exceeded(e: BaseException | None) -> LLMBudgetExceeded | None:
+    while e is not None and not isinstance(e, LLMBudgetExceeded):
+        e = e.__cause__ or e.__context__
+    return e
 
 
 def _reset_rate_limit_strikes() -> None:

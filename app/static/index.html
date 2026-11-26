@@ -190,6 +190,8 @@ function openDetail(docId) {
     ["Uploaded on", fmtDateLong(d.uploaded_at)],
   ];
   if (d.indexed_at) rows.push(["Indexed on", fmtDateLong(d.indexed_at)]);
+  if (d.index_mode) rows.push(["Index mode", d.index_mode]);
+  if (d.usage) rows.push(["Tokens used", `${d.usage.prompt_tokens.toLocaleString()} prompt / ${d.usage.completion_tokens.toLocaleString()} completion`]);
   if (d.type !== "text") rows.push(["Figures", figureLabel(d) || "not extracted"]);
   $("mMeta").innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${esc(String(v ?? "?"))}</dd>`).join("");
   $("mOpen").textContent = d.type === "text" ? "Open file" : "Open PDF";

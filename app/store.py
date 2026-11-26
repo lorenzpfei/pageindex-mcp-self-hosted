@@ -3,7 +3,7 @@
 Layout under DATA_DIR:
   pdfs/<doc_id>.pdf       - original PDF
   files/<doc_id>.txt      - plain-text documents (stored as-is, no tree)
-  trees/<doc_id>.json     - PageIndex tree structure (output of page_index_main)
+  trees/<doc_id>.json     - PageIndex tree structure (flash or standard index, see jobs.py)
   media/<doc_id>/         - page images, figure crops and figures.json (see media.py)
   documents.json          - {"projects": [...], "documents": {doc_id: {...}}}
 
@@ -13,7 +13,9 @@ page_count, line_count (text only), sha256 (of the uploaded bytes, missing on
 documents stored before deduplication existed), status ("queued" |
 "processing" | "done" | "failed"), error, uploaded_at, indexed_at (last
 successful ingest), and for figure extraction media_status (same values),
-media_error, figure_count, media_at.
+media_error, figure_count, media_at. PDFs indexed since the flash switch also
+carry index_mode ("flash" | "standard") and usage (prompt/completion/total
+tokens of the tree build).
 """
 import json
 import os
@@ -169,7 +171,7 @@ def delete_document(doc_id: str) -> dict | None:
 
 
 def load_doc_info(doc_id: str) -> dict | None:
-    """Build the doc_info dict expected by pageindex.retrieve functions.
+    """Build the doc_info dict expected by the retrieve functions.
 
     Only valid for documents with status "done" (for PDFs, the tree file must
     exist; text documents have no tree).

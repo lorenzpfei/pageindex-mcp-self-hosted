@@ -7,23 +7,20 @@ MCP tools serialise the payload and drop the status.
 """
 import hashlib
 import os
-import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from pageindex.utils import get_number_of_pages
 
-from pageindex.utils import get_number_of_pages  # noqa: E402
-
-import jobs  # noqa: E402
-import media  # noqa: E402
-import search  # noqa: E402
-import store  # noqa: E402
-import textfiles  # noqa: E402
+import jobs
+import media
+import search
+import store
+import textfiles
 
 PROJECT_NAME_MAX = 100
 DOCUMENT_NAME_MAX = 200
 
 # Upper bound for anything entering the server, uploaded or downloaded. The
-# container runs under a hard 2 GB memory cap while ingest workers already
+# container runs under a hard 3 GB memory cap while ingest workers already
 # hold a PDF plus its tree in RAM, so an unbounded body would OOM it.
 # Plain-text files are additionally capped at textfiles.MAX_TEXT_BYTES.
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
